@@ -1,0 +1,19 @@
+{
+  "name": "Auri",
+  "short_name": "Auri",
+  "description": "Private, local-first cross-platform chat on Android & Windows with Frutiger Aero aesthetics.",
+  "start_url": "/",
+  "id": "/",
+  "display": "standalone",
+  "background_color": "#e0f2fe",
+  "theme_color": "#38bdf8",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
