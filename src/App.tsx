@@ -1,0 +1,789 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import type { Conversation, Message, MessageType, UserProfile, QuotedReply } from './types';
+import {
+  getStoredProfile,
+  saveProfile,
+  getConversations,
+  getConversation,
+  saveConversation,
+  deleteConversation as deleteStorageConvo,
+  getMessages,
+  saveMessage,
+  deleteMessage as deleteStorageMessage,
+  updateMessageStatus,
+  addReactionToMessage,
+  getLocalDB,
+} from './services/storage';
+import { network } from './services/network';
+import { Sidebar } from './components/Sidebar';
+import { ChatArea } from './components/ChatArea';
+import { DevicePairingModal } from './components/DevicePairingModal';
+import { SettingsModal } from './components/SettingsModal';
+import { OnboardingModal } from './components/OnboardingModal';
+import { notifications } from './services/notifications';
+
+export function getCanonicalConvoId(id1: string, id2: string): string {
+  const a = (id1 || '').trim().toLowerCase();
+  const b = (id2 || '').trim().toLowerCase();
+  return `convo_${[a, b].sort().join('_')}`;
+}
+
+export const App: React.FC = () => {
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [activeMessages, setActiveMessages] = useState<Message[]>([]);
+  const [isServerConnected, setIsServerConnected] = useState<boolean>(false);
+  const [isPairingModalOpen, setIsPairingModalOpen] = useState<boolean>(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
+  const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState<boolean>(false);
+  const [totalMessageCount, setTotalMessageCount] = useState<number>(0);
+  const [inAppToast, setInAppToast] = useState<{
+    senderName: string;
+    content: string;
+    conversationId: string;
+  } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const activeConvoRef = useRef<string | null>(null);
+  activeConvoRef.current = activeConversationId;
+  const profileRef = useRef<UserProfile | null>(null);
+  profileRef.current = profile;
+  const conversationsRef = useRef<Conversation[]>(conversations);
+  conversationsRef.current = conversations;
+  const isPairingModalOpenRef = useRef<boolean>(false);
+  isPairingModalOpenRef.current = isPairingModalOpen;
+  const isSettingsModalOpenRef = useRef<boolean>(false);
+  isSettingsModalOpenRef.current = isSettingsModalOpen;
+
+  // Handle Android / mobile browser hardware & gesture back button
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      const state = event.state;
+      if (!state) {
+        if (isPairingModalOpenRef.current) setIsPairingModalOpen(false);
+        if (isSettingsModalOpenRef.current) setIsSettingsModalOpen(false);
+        if (activeConvoRef.current) setActiveConversationId(null);
+        return;
+      }
+
+      if (state.view === 'chat' && state.id) {
+        setActiveConversationId(state.id);
+        setIsPairingModalOpen(false);
+        setIsSettingsModalOpen(false);
+      } else if (state.view === 'pairing') {
+        setIsPairingModalOpen(true);
+        setIsSettingsModalOpen(false);
+      } else if (state.view === 'settings') {
+        setIsSettingsModalOpen(true);
+        setIsPairingModalOpen(false);
+      } else {
+        setActiveConversationId(null);
+        setIsPairingModalOpen(false);
+        setIsSettingsModalOpen(false);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // 1. Initial Load from Local IndexedDB
+  useEffect(() => {
+    async function loadInitialData() {
+      const loadedProfile = await getStoredProfile();
+      setProfile(loadedProfile);
+
+      // Check if this device has completed initial profile setup (username, pfp, display name, bio)
+      const hasCompleted = loadedProfile.hasCompletedOnboarding || localStorage.getItem('auri_onboarding_completed') === 'true';
+      if (!hasCompleted) {
+        setIsOnboardingModalOpen(true);
+      }
+
+      let convos = await getConversations();
+      setConversations(convos);
+
+      if (convos.length > 0 && window.innerWidth >= 768) {
+        setActiveConversationId(convos[0].id);
+      }
+
+      // Count total local messages
+      const db = await getLocalDB();
+      const count = await db.count('messages');
+      setTotalMessageCount(count);
+
+      // Initialize network relay connection and profile
+      network.setMyProfile(loadedProfile);
+      network.init(loadedProfile.peerId, loadedProfile.relayUrl);
+
+      // Handle account invite links from URL query parameters: ?user=<username> or ?connect=<username>
+      const params = new URLSearchParams(window.location.search);
+      const targetUser = params.get('user') || params.get('connect');
+      if (targetUser) {
+        const cleanUser = targetUser.trim().replace(/^@/, '');
+        if (cleanUser && cleanUser.toLowerCase() !== loadedProfile.peerId.toLowerCase()) {
+          const canonicalConvoId = getCanonicalConvoId(loadedProfile.peerId, cleanUser);
+          let targetConvo = convos.find(
+            (c) => c.peerId.trim().toLowerCase() === cleanUser.toLowerCase() || c.id.toLowerCase() === canonicalConvoId.toLowerCase()
+          );
+          if (!targetConvo) {
+            targetConvo = {
+              id: canonicalConvoId,
+              peerId: cleanUser,
+              peerName: cleanUser,
+              peerAvatar: '#0ea5e9',
+              unreadCount: 0,
+              updatedAt: Date.now(),
+              connectionMode: 'connecting',
+            };
+            await saveConversation(targetConvo);
+            convos = [targetConvo, ...convos];
+            setConversations(convos);
+          }
+          setActiveConversationId(targetConvo.id);
+          network.initiateWebRTC(cleanUser).catch(console.warn);
+          network.sendProfileUpdateToPeer(cleanUser);
+
+          // Clean URL params so refresh keeps current state clean
+          const cleanPath = window.location.pathname;
+          window.history.replaceState({ view: 'chat', id: targetConvo.id }, '', cleanPath);
+        }
+      }
+    }
+
+    loadInitialData();
+
+    return () => {
+      network.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleFocus = () => notifications.clearTitleBadge();
+    window.addEventListener('focus', handleFocus);
+
+    // Deep link / navigation callback from native or ServiceWorker notification click
+    notifications.onNotificationNavigate((conversationId) => {
+      handleSelectConversation(conversationId);
+    });
+
+    // Touch gesture unlock for Web Audio chime (needed on Android Chrome)
+    const unlockAudio = () => {
+      notifications.playChime();
+      window.removeEventListener('click', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+    };
+    window.addEventListener('click', unlockAudio, { once: true });
+    window.addEventListener('touchstart', unlockAudio, { once: true });
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('click', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  // 2. Load Messages when active conversation changes
+  useEffect(() => {
+    if (!activeConversationId) {
+      setActiveMessages([]);
+      return;
+    }
+
+    async function loadActiveMessages() {
+      const msgs = await getMessages(activeConversationId!);
+      setActiveMessages(msgs);
+
+      // Clear unread count for active conversation
+      const convo = await getConversation(activeConversationId!);
+      if (convo && convo.unreadCount > 0) {
+        convo.unreadCount = 0;
+        await saveConversation(convo);
+        setConversations((prev) =>
+          prev.map((c) => (c.id === activeConversationId ? { ...c, unreadCount: 0 } : c))
+        );
+      }
+
+      // Automatically attempt direct P2P connection
+      if (convo) {
+        network.initiateWebRTC(convo.peerId).catch(() => {
+          // Normal fallback to relay
+        });
+      }
+    }
+
+    loadActiveMessages();
+  }, [activeConversationId]);
+
+  // 3. Setup Network Event Handlers
+  useEffect(() => {
+    const unsubMsg = network.onMessageReceived(async (incomingMsg, senderPeerId) => {
+      const myId = profileRef.current?.peerId || '';
+      const normSender = (senderPeerId || '').trim().toLowerCase();
+      const canonicalConvoId = myId ? getCanonicalConvoId(myId, senderPeerId) : incomingMsg.conversationId;
+
+      // Check if conversation already exists by peerId (case-insensitive) OR by canonicalConvoId
+      const currentConvos = conversationsRef.current;
+      let convo = currentConvos.find((c) => c.peerId.trim().toLowerCase() === normSender)
+               || currentConvos.find((c) => c.id.toLowerCase() === canonicalConvoId.toLowerCase())
+               || await getConversation(canonicalConvoId)
+               || await getConversation(incomingMsg.conversationId);
+
+      if (!convo) {
+        const cleanSender = (senderPeerId || '').trim();
+        const defaultName = cleanSender.toUpperCase().startsWith('AND')
+          ? 'Android Phone'
+          : cleanSender.toUpperCase().startsWith('WIN')
+            ? 'Windows PC'
+            : cleanSender;
+
+        convo = {
+          id: canonicalConvoId,
+          peerId: cleanSender,
+          peerName: defaultName,
+          unreadCount: 0,
+          updatedAt: incomingMsg.timestamp,
+          connectionMode: 'ephemeral-relay',
+        };
+        await saveConversation(convo);
+      }
+
+      // Ensure message conversationId matches local conversation
+      incomingMsg.conversationId = convo.id;
+
+      // Save to device local IndexedDB
+      await saveMessage(incomingMsg);
+
+      // Check if user is currently viewing this conversation
+      const currentActiveId = activeConvoRef.current;
+      const activeChat = currentConvos.find((c) => c.id === currentActiveId);
+      const isViewingThisChat = (currentActiveId === convo.id)
+        || (activeChat && activeChat.peerId.trim().toLowerCase() === normSender);
+
+      if (isViewingThisChat) {
+        setActiveMessages((prev) => {
+          if (prev.some((m) => m.id === incomingMsg.id)) return prev;
+          return [...prev, incomingMsg];
+        });
+        network.sendReadAck(senderPeerId, incomingMsg.id);
+        await updateMessageStatus(incomingMsg.id, 'read');
+      }
+
+      // Refresh conversations list
+      const updatedConvos = await getConversations();
+      setConversations(updatedConvos);
+      setTotalMessageCount((prev) => prev + 1);
+
+      // Notification audio chime & phone tactile vibration
+      notifications.playChime();
+
+      // Native Desktop / Android System Notification & Title Badge
+      notifications.showMessageNotification({
+        senderName: convo.peerName,
+        messageType: incomingMsg.type,
+        content: incomingMsg.content,
+        conversationId: convo.id,
+        isViewingThisChat,
+        onNotificationClick: () => {
+          handleSelectConversation(convo.id);
+        },
+      });
+
+      // In-app floating drop-down banner if not currently viewing this conversation
+      if (!isViewingThisChat) {
+        let snippet = incomingMsg.content;
+        if (incomingMsg.type === 'image') snippet = '📷 Photo';
+        else if (incomingMsg.type === 'voice') snippet = '🎤 Voice message';
+        else if (incomingMsg.type === 'file') snippet = '📎 Shared file';
+        else if (snippet && snippet.length > 60) snippet = snippet.substring(0, 60) + '...';
+
+        setInAppToast({
+          senderName: convo.peerName,
+          content: snippet || 'New message',
+          conversationId: convo.id,
+        });
+
+        if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = setTimeout(() => {
+          setInAppToast(null);
+        }, 4000);
+      }
+    });
+
+    const unsubStatus = network.onStatusUpdate((messageId, status) => {
+      updateMessageStatus(messageId, status);
+      setActiveMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, status } : m))
+      );
+    });
+
+    const unsubMode = network.onConnectionMode((peerId, mode) => {
+      setConversations((prev) =>
+        prev.map((c) => (c.peerId === peerId ? { ...c, connectionMode: mode } : c))
+      );
+    });
+
+    const unsubTyping = network.onTyping((senderPeerId, isTyping) => {
+      setConversations((prev) =>
+        prev.map((c) => (c.peerId === senderPeerId ? { ...c, isTyping } : c))
+      );
+    });
+
+    const unsubProfile = network.onPeerProfileUpdate(async (peerId, updatedProfile) => {
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.peerId.toLowerCase() === peerId.toLowerCase()) {
+            return {
+              ...c,
+              peerName: updatedProfile.displayName || c.peerName,
+              peerAvatar: updatedProfile.avatarColor || c.peerAvatar,
+              peerAvatarImage: updatedProfile.avatarImage !== undefined ? updatedProfile.avatarImage : c.peerAvatarImage,
+              peerBio: updatedProfile.bio !== undefined ? updatedProfile.bio : c.peerBio,
+            };
+          }
+          return c;
+        })
+      );
+
+      const convo = conversationsRef.current.find(
+        (c) => c.peerId.toLowerCase() === peerId.toLowerCase()
+      );
+      if (convo) {
+        const toSave: Conversation = {
+          ...convo,
+          peerName: updatedProfile.displayName || convo.peerName,
+          peerAvatar: updatedProfile.avatarColor || convo.peerAvatar,
+          peerAvatarImage: updatedProfile.avatarImage !== undefined ? updatedProfile.avatarImage : convo.peerAvatarImage,
+          peerBio: updatedProfile.bio !== undefined ? updatedProfile.bio : convo.peerBio,
+        };
+        await saveConversation(toSave);
+      }
+    });
+
+    const unsubServer = network.onServerStatus((connected) => {
+      setIsServerConnected(connected);
+    });
+
+    const unsubReaction = network.onReaction(async (messageId, emoji, senderPeerId) => {
+      const updated = await addReactionToMessage(messageId, emoji, senderPeerId);
+      if (updated) {
+        setActiveMessages((prev) =>
+          prev.map((m) => (m.id === messageId ? { ...m, reactions: updated.reactions } : m))
+        );
+      }
+    });
+
+    return () => {
+      unsubMsg();
+      unsubStatus();
+      unsubMode();
+      unsubTyping();
+      unsubProfile();
+      unsubServer();
+      unsubReaction();
+    };
+  }, []);
+
+  // 4. Send Message Handler
+  const handleSendMessage = useCallback(
+    async (
+      type: MessageType,
+      content?: string,
+      media?: {
+        blob?: Blob;
+        duration?: number;
+        waveform?: number[];
+        dimensions?: { width: number; height: number };
+        thumbnailBase64?: string;
+        mime?: string;
+        fileName?: string;
+        fileSize?: number;
+        fileExtension?: string;
+      },
+      replyTo?: QuotedReply
+    ) => {
+      if (!activeConversationId || !profile) return;
+      const convo = conversations.find((c) => c.id === activeConversationId);
+      if (!convo) return;
+
+      const messageId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      const newMessage: Message = {
+        id: messageId,
+        conversationId: activeConversationId,
+        senderId: 'me',
+        senderName: profile.displayName,
+        type,
+        content,
+        replyTo,
+        mediaBlob: media?.blob,
+        mediaDuration: media?.duration,
+        mediaWaveform: media?.waveform,
+        mediaDimensions: media?.dimensions,
+        thumbnailBase64: media?.thumbnailBase64,
+        mediaMime: media?.mime,
+        fileName: media?.fileName,
+        fileSize: media?.fileSize,
+        fileExtension: media?.fileExtension,
+        status: 'sending',
+        timestamp: Date.now(),
+      };
+
+      // 1. Immediately store in local IndexedDB
+      await saveMessage(newMessage);
+      setActiveMessages((prev) => [...prev, newMessage]);
+      setTotalMessageCount((prev) => prev + 1);
+
+      // Refresh sidebar list
+      const updatedConvos = await getConversations();
+      setConversations(updatedConvos);
+
+      // 2. Transmit over WebRTC P2P or Ephemeral Relay
+      try {
+        const modeUsed = await network.sendMessage(convo.peerId, newMessage);
+        await updateMessageStatus(messageId, 'sent');
+        setActiveMessages((prev) =>
+          prev.map((m) => (m.id === messageId ? { ...m, status: 'sent' } : m))
+        );
+
+        // Update connection mode display
+        setConversations((prev) =>
+          prev.map((c) => (c.id === convo.id ? { ...c, connectionMode: modeUsed } : c))
+        );
+      } catch (err) {
+        console.error('Send message error:', err);
+      }
+    },
+    [activeConversationId, conversations, profile]
+  );
+
+  // Delete a single message from local IndexedDB
+  const handleDeleteMessage = useCallback(async (messageId: string) => {
+    await deleteStorageMessage(messageId);
+    setActiveMessages((prev) => prev.filter((m) => m.id !== messageId));
+    const updatedConvos = await getConversations();
+    setConversations(updatedConvos);
+    setTotalMessageCount((prev) => Math.max(0, prev - 1));
+  }, []);
+
+  // Navigation helpers for mobile Android back gesture & hardware button
+  const handleSelectConversation = (id: string | null) => {
+    if (id) {
+      window.history.pushState({ view: 'chat', id }, '');
+    }
+    setActiveConversationId(id);
+  };
+
+  const handleBackFromChat = () => {
+    if (window.history.state?.view === 'chat') {
+      window.history.back();
+    } else {
+      setActiveConversationId(null);
+    }
+  };
+
+  const handleOpenPairing = () => {
+    window.history.pushState({ view: 'pairing' }, '');
+    setIsPairingModalOpen(true);
+  };
+
+  const handleClosePairing = () => {
+    if (window.history.state?.view === 'pairing') {
+      window.history.back();
+    } else {
+      setIsPairingModalOpen(false);
+    }
+  };
+
+  const handleOpenSettings = () => {
+    window.history.pushState({ view: 'settings' }, '');
+    setIsSettingsModalOpen(true);
+  };
+
+  const handleCloseSettings = () => {
+    if (window.history.state?.view === 'settings') {
+      window.history.back();
+    } else {
+      setIsSettingsModalOpen(false);
+    }
+  };
+
+  // 5. Connect to New Peer from Pairing Modal
+  const handleConnectPeer = async (peerId: string, peerName: string) => {
+    if (!profile) return;
+    const cleanId = peerId.trim().replace(/^@/, '');
+    if (!cleanId) return;
+
+    setIsPairingModalOpen(false);
+    const canonicalConvoId = getCanonicalConvoId(profile.peerId, cleanId);
+    let existing = conversations.find(
+      (c) => c.peerId.trim().toLowerCase() === cleanId.toLowerCase() || c.id.toLowerCase() === canonicalConvoId.toLowerCase()
+    );
+    if (!existing) {
+      const newConvo: Conversation = {
+        id: canonicalConvoId,
+        peerId: cleanId,
+        peerName: peerName.trim() || cleanId,
+        peerAvatar: ['#6366f1', '#ec4899', '#10b981', '#f59e0b', '#06b6d4'][
+          Math.floor(Math.random() * 5)
+        ],
+        unreadCount: 0,
+        updatedAt: Date.now(),
+        connectionMode: 'connecting',
+      };
+
+      await saveConversation(newConvo);
+      setConversations((prev) => [newConvo, ...prev]);
+      handleSelectConversation(canonicalConvoId);
+      network.initiateWebRTC(cleanId).catch(console.warn);
+      network.sendProfileUpdateToPeer(cleanId);
+    } else {
+      handleSelectConversation(existing.id);
+      network.initiateWebRTC(existing.peerId).catch(console.warn);
+      network.sendProfileUpdateToPeer(existing.peerId);
+    }
+  };
+
+  // 6. Message Reactions
+  const handleToggleReaction = async (messageId: string, emoji: string) => {
+    const updated = await addReactionToMessage(messageId, emoji, 'me');
+    if (updated) {
+      setActiveMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, reactions: updated.reactions } : m))
+      );
+    }
+
+    // Broadcast reaction to active conversation peer across network
+    if (activeConversationId) {
+      const convo = conversationsRef.current.find((c) => c.id === activeConversationId);
+      if (convo) {
+        network.sendReaction(convo.peerId, messageId, emoji);
+      }
+    }
+  };
+
+  // 7. Typing Indicator
+  const handleSendTyping = (isTyping: boolean) => {
+    if (!activeConversationId) return;
+    const convo = conversations.find((c) => c.id === activeConversationId);
+    if (convo) {
+      network.sendTyping(convo.peerId, isTyping);
+    }
+  };
+
+  // 8. Delete Conversation
+  const handleDeleteConversation = async (id: string) => {
+    await deleteStorageConvo(id);
+    setConversations((prev) => prev.filter((c) => c.id !== id));
+    if (activeConversationId === id) {
+      handleBackFromChat();
+    }
+  };
+
+  // 9. Wipe All Local Data
+  const handleClearAllData = async () => {
+    const db = await getLocalDB();
+    await db.clear('conversations');
+    await db.clear('messages');
+    setConversations([]);
+    setActiveMessages([]);
+    setActiveConversationId(null);
+    setTotalMessageCount(0);
+  };
+
+  // 10. Update Profile Settings
+  const handleSaveProfile = async (newProfile: UserProfile) => {
+    const oldPeerId = profile?.peerId;
+    setProfile(newProfile);
+    await saveProfile(newProfile);
+    network.setMyProfile(newProfile);
+
+    if (newProfile.peerId !== oldPeerId) {
+      network.updatePeerId(newProfile.peerId);
+    }
+    network.updateRelayUrl(newProfile.relayUrl);
+
+    // Broadcast our updated profile to all conversation peers
+    const peerIds = conversationsRef.current.map((c) => c.peerId);
+    network.broadcastProfileUpdate(newProfile, peerIds);
+  };
+
+  const handleSaveOnboarding = async (newProfile: UserProfile) => {
+    const oldPeerId = profile?.peerId;
+    const completedProfile = { ...newProfile, hasCompletedOnboarding: true };
+    setProfile(completedProfile);
+    await saveProfile(completedProfile);
+    localStorage.setItem('auri_onboarding_completed', 'true');
+    setIsOnboardingModalOpen(false);
+
+    network.setMyProfile(completedProfile);
+    if (completedProfile.peerId !== oldPeerId) {
+      network.updatePeerId(completedProfile.peerId);
+    }
+    network.updateRelayUrl(completedProfile.relayUrl);
+
+    // Broadcast our updated profile to all conversation peers
+    const peerIds = conversationsRef.current.map((c) => c.peerId);
+    if (peerIds.length > 0) {
+      network.broadcastProfileUpdate(completedProfile, peerIds);
+    }
+  };
+
+  const activeConvo = conversations.find((c) => c.id === activeConversationId);
+
+  return (
+    <div className="app-shell">
+      {/* Ambient Frutiger Aero Atmosphere: Aqua Sheen, Pinstripes & Floating Bubbles */}
+      <div className="aero-bubbles-container" aria-hidden="true">
+        <div className="aero-pinstripes" />
+        <div className="aero-light-sweep" />
+        <div className="aero-bubble b1 aero-blue" />
+        <div className="aero-bubble b2 aero-pink" />
+        <div className="aero-bubble b3 aero-mint" />
+        <div className="aero-bubble b4 aero-amber" />
+        <div className="aero-bubble b5 aero-blue pulse-bubble" />
+        <div className="aero-bubble b6 aero-pink" />
+        <div className="aero-bubble b7 aero-mint" />
+        <div className="aero-bubble b8 aero-amber pulse-bubble" />
+        <div className="aero-bubble b9 aero-blue" />
+        <div className="aero-bubble b10 aero-pink" />
+      </div>
+
+      {/* Floating In-App Dropdown Toast Banner */}
+      {inAppToast && (
+        <div
+          className="in-app-toast-banner"
+          onClick={() => {
+            handleSelectConversation(inAppToast.conversationId);
+            setInAppToast(null);
+          }}
+          role="alert"
+        >
+          <div className="in-app-toast-icon">💬</div>
+          <div className="in-app-toast-body">
+            <div className="in-app-toast-sender">{inAppToast.senderName}</div>
+            <div className="in-app-toast-snippet">{inAppToast.content}</div>
+          </div>
+          <button
+            type="button"
+            className="in-app-toast-close"
+            onClick={(e) => {
+              e.stopPropagation();
+              setInAppToast(null);
+            }}
+            aria-label="Close notification"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Sidebar: Conversation List */}
+      <div className={`sidebar-pane ${activeConversationId ? 'hide-on-mobile' : ''}`}>
+        {profile && (
+          <Sidebar
+            conversations={conversations}
+            activeConversationId={activeConversationId}
+            onSelectConversation={handleSelectConversation}
+            onOpenPairing={handleOpenPairing}
+            onOpenSettings={handleOpenSettings}
+            onDeleteConversation={handleDeleteConversation}
+            profile={profile}
+            isServerConnected={isServerConnected}
+          />
+        )}
+      </div>
+
+      {/* Main Chat Area */}
+      <div className={`chat-pane ${!activeConversationId ? 'hide-on-mobile' : ''}`}>
+        {activeConvo ? (
+          <ChatArea
+            conversation={activeConvo}
+            messages={activeMessages}
+            onSendMessage={handleSendMessage}
+            onDeleteMessage={handleDeleteMessage}
+            onBack={handleBackFromChat}
+            onToggleReaction={handleToggleReaction}
+            onSendTyping={handleSendTyping}
+            onInitiateP2P={(peerId) => network.initiateWebRTC(peerId)}
+          />
+        ) : (
+          <div className="no-chat-selected">
+            <div className="welcome-card">
+              <div className="welcome-app-icon">💬</div>
+              <h2>Auri Local-First</h2>
+              <p>
+                Private cross-platform chat running seamlessly on <strong>Android</strong> and <strong>Windows</strong> across any distance.
+              </p>
+              <div className="welcome-features-list">
+                <div className="feature-item">
+                  <span className="feature-bullet">🔒</span>
+                  <span>100% On-Device Local Storage (Zero Cloud DB)</span>
+                </div>
+                <div className="feature-item">
+                  <span className="feature-bullet">🎤</span>
+                  <span>Voice notes with live scrubbing waveforms</span>
+                </div>
+                <div className="feature-item">
+                  <span className="feature-bullet">📷</span>
+                  <span>Camera snapshot, gallery photos & full-screen lightbox</span>
+                </div>
+                <div className="feature-item">
+                  <span className="feature-bullet">📎</span>
+                  <span>Share files, documents, and clickable URL links</span>
+                </div>
+                <div className="feature-item">
+                  <span className="feature-bullet">⚡</span>
+                  <span>WebRTC P2P direct + Zero-Retention Relay</span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                className="welcome-pair-btn"
+                onClick={handleOpenPairing}
+              >
+                <span>Pair Android or Windows Device</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Device Pairing Modal */}
+      {profile && (
+        <DevicePairingModal
+          isOpen={isPairingModalOpen}
+          myPeerId={profile.peerId}
+          onClose={handleClosePairing}
+          onConnectPeer={handleConnectPeer}
+          existingConversations={conversations}
+        />
+      )}
+
+      {/* Settings Modal */}
+      {profile && (
+        <SettingsModal
+          isOpen={isSettingsModalOpen}
+          profile={profile}
+          onClose={handleCloseSettings}
+          onSaveProfile={handleSaveProfile}
+          onClearAllData={handleClearAllData}
+          messageCount={totalMessageCount}
+          convoCount={conversations.length}
+        />
+      )}
+
+      {/* First-Time Device Onboarding Modal */}
+      {profile && (
+        <OnboardingModal
+          isOpen={isOnboardingModalOpen}
+          initialProfile={profile}
+          onComplete={handleSaveOnboarding}
+        />
+      )}
+    </div>
+  );
+};
+
+export default App;
