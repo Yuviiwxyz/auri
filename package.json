@@ -8,11 +8,15 @@
     "server": "node server/server.js",
     "online": "node server/public.js",
     "build": "tsc -b && vite build",
+    "start": "node server/server.js",
     "test:relay": "node test_relay.js",
     "lint": "oxlint",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/cli": "^8.5.1",
+    "@capacitor/core": "^8.5.1",
     "idb": "^8.0.3",
     "jsqr": "^1.4.0",
     "localtunnel": "^2.0.2",
