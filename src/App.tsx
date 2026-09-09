@@ -45,6 +45,7 @@ export const App: React.FC = () => {
     content: string;
     conversationId: string;
   } | null>(null);
+  const [androidPromptUser, setAndroidPromptUser] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeConvoRef = useRef<string | null>(null);
@@ -146,10 +147,12 @@ export const App: React.FC = () => {
           network.initiateWebRTC(cleanUser).catch(console.warn);
           network.sendProfileUpdateToPeer(cleanUser);
 
-          // If viewing on mobile browser, attempt to launch installed Auri APK
+          // If viewing on mobile browser, prompt and attempt 1-tap launch of installed Auri APK
           if (!Capacitor.isNativePlatform() && /Android/i.test(navigator.userAgent)) {
+            setAndroidPromptUser(cleanUser);
             try {
-              window.location.href = `auri://chat?user=${encodeURIComponent(cleanUser)}`;
+              const intentUri = `intent://chat?user=${encodeURIComponent(cleanUser)}#Intent;scheme=auri;package=com.auri.chat;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end`;
+              window.location.href = intentUri;
             } catch {}
           }
 
@@ -902,6 +905,34 @@ export const App: React.FC = () => {
           initialProfile={profile}
           onComplete={handleSaveOnboarding}
         />
+      )}
+
+      {/* Floating 1-Tap Android App Launch Banner for Mobile Chrome */}
+      {androidPromptUser && !Capacitor.isNativePlatform() && (
+        <div className="android-intent-banner">
+          <div className="android-intent-content">
+            <div className="android-intent-icon">✨</div>
+            <div className="android-intent-text">
+              <strong>Chat with @{androidPromptUser} in Auri App</strong>
+              <span>Tap to switch directly to your installed Auri application</span>
+            </div>
+          </div>
+          <div className="android-intent-actions">
+            <a
+              href={`intent://chat?user=${encodeURIComponent(androidPromptUser)}#Intent;scheme=auri;package=com.auri.chat;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end`}
+              className="android-intent-open-btn"
+            >
+              🚀 Open in App
+            </a>
+            <button
+              type="button"
+              className="android-intent-dismiss-btn"
+              onClick={() => setAndroidPromptUser(null)}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

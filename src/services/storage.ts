@@ -75,34 +75,15 @@ export function getDefaultRelayUrl(): string {
     const savedCustom = localStorage.getItem('auri_custom_relay');
     if (savedCustom && savedCustom.trim()) return savedCustom.trim();
 
-    const origin = window.location.origin;
-    const isCapacitor = (window as any).Capacitor?.isNativePlatform?.() || origin.startsWith('capacitor:');
-    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-
     // If custom cloud domain is saved by user in Settings
     const savedDomain = localStorage.getItem('auri_custom_domain');
     if (savedDomain && savedDomain.trim()) {
       const host = savedDomain.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
       return `wss://${host}/relay`;
     }
-
-    // If running in Android APK: connect directly to dev server IP
-    if (isCapacitor) {
-      return 'ws://10.124.119.104:3001';
-    }
-
-    // If running in browser on local machine
-    if (isLocal) {
-      return `ws://${window.location.hostname || 'localhost'}:3001`;
-    }
-
-    // If running on custom HTTPS domain (e.g. onrender, tunnel)
-    if (window.location.protocol === 'https:' && !window.location.host.endsWith('github.io')) {
-      return `wss://${window.location.host}/relay`;
-    }
   }
-  // Default to active dev server relay
-  return 'ws://10.124.119.104:3001';
+  // Default to 24/7 high-availability global cloud MQTT broker (works anywhere, no PC required)
+  return 'wss://broker.hivemq.com:8884/mqtt';
 }
 
 // Profile storage
@@ -118,8 +99,22 @@ export async function getStoredProfile(): Promise<UserProfile> {
   const allProfiles = await db.getAll('user_profile');
 
   if (cached) {
+    // Auto-heal stale or broken relay URLs from previous sessions
+    if (
+      !cached.relayUrl ||
+      cached.relayUrl.includes('onrender.com') ||
+      cached.relayUrl.includes('10.124.119.104') ||
+      cached.relayUrl.includes('localhost') ||
+      cached.relayUrl.includes('127.0.0.1')
+    ) {
+      cached.relayUrl = getDefaultRelayUrl();
+      try {
+        localStorage.setItem('auri_active_profile', JSON.stringify(cached));
+      } catch {}
+    }
+
     // If DB is out of sync or has old entries, sync it now
-    if (allProfiles.length !== 1 || allProfiles[0].peerId !== cached.peerId) {
+    if (allProfiles.length !== 1 || allProfiles[0].peerId !== cached.peerId || allProfiles[0].relayUrl !== cached.relayUrl) {
       const tx = db.transaction('user_profile', 'readwrite');
       await tx.objectStore('user_profile').clear();
       await tx.objectStore('user_profile').put(cached);
@@ -131,6 +126,15 @@ export async function getStoredProfile(): Promise<UserProfile> {
   if (allProfiles.length > 0) {
     // Return the latest profile and cache in localStorage
     const profile = allProfiles[allProfiles.length - 1];
+    if (
+      !profile.relayUrl ||
+      profile.relayUrl.includes('onrender.com') ||
+      profile.relayUrl.includes('10.124.119.104') ||
+      profile.relayUrl.includes('localhost') ||
+      profile.relayUrl.includes('127.0.0.1')
+    ) {
+      profile.relayUrl = getDefaultRelayUrl();
+    }
     try {
       localStorage.setItem('auri_active_profile', JSON.stringify(profile));
       if (profile.hasCompletedOnboarding) {

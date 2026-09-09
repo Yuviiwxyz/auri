@@ -15,6 +15,21 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+      (function() {
+        try {
+          var params = new URLSearchParams(window.location.search);
+          var user = params.get('user') || params.get('connect') || params.get('id');
+          var isAndroid = /Android/i.test(navigator.userAgent);
+          var isNativeCapacitor = window.location.origin.startsWith('capacitor:') || /Capacitor/i.test(navigator.userAgent);
+          if (isAndroid && user && !isNativeCapacitor) {
+            var clean = encodeURIComponent(user.trim().replace(/^@/, ''));
+            var intentUri = 'intent://chat?user=' + clean + '#Intent;scheme=auri;package=com.auri.chat;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end';
+            window.location.href = intentUri;
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

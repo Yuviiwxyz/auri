@@ -1,5 +1,6 @@
 import type { Message, ConnectionMode, UserProfile } from '../types';
 import { blobToBase64, base64ToBlob } from './storage';
+import mqtt, { type MqttClient } from 'mqtt';
 
 export type MessageReceivedHandler = (message: Message, senderPeerId: string) => void;
 export type StatusUpdateHandler = (messageId: string, status: Message['status']) => void;
@@ -32,6 +33,7 @@ const ICE_SERVERS: RTCConfiguration = {
 
 class NetworkService {
   private ws: WebSocket | null = null;
+  private mqttClient: MqttClient | null = null;
   private peerId: string = '';
   private relayUrl: string = '';
   private isConnecting: boolean = false;
@@ -77,7 +79,13 @@ class NetworkService {
   public updatePeerId(newPeerId: string) {
     if (this.peerId !== newPeerId) {
       this.peerId = newPeerId;
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (this.mqttClient && this.mqttClient.connected) {
+        const cleanId = this.peerId.trim().toLowerCase();
+        this.mqttClient.subscribe(`auri/v1/peer/${cleanId}/inbox`, { qos: 1 });
+        if (cleanId !== this.peerId.trim()) {
+          this.mqttClient.subscribe(`auri/v1/peer/${this.peerId.trim()}/inbox`, { qos: 1 });
+        }
+      } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.sendWs({
           type: 'register',
           peerId: this.peerId,
@@ -149,73 +157,143 @@ class NetworkService {
 
   private failCount: number = 0;
   private readonly fallbackRelays = [
-    'ws://10.124.119.104:3001',
-    'wss://auri-chat-app.onrender.com/relay',
+    'wss://broker.hivemq.com:8884/mqtt',
+    'wss://broker.emqx.io:8084/mqtt',
   ];
 
   public connectRelay() {
+    if (this.mqttClient && this.mqttClient.connected) {
+      return;
+    }
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
-    let targetUrl = this.relayUrl || 'ws://10.124.119.104:3001';
+    let targetUrl = this.relayUrl || 'wss://broker.hivemq.com:8884/mqtt';
     if (this.failCount >= 2) {
       const alt = this.fallbackRelays.find((u) => u !== this.relayUrl) || this.fallbackRelays[0];
       targetUrl = alt;
     }
 
     this.isConnecting = true;
-    try {
-      this.ws = new WebSocket(targetUrl);
+    const isMqtt = targetUrl.includes('/mqtt') || targetUrl.includes('hivemq') || targetUrl.includes('emqx');
 
-      this.ws.onopen = () => {
-        this.isConnecting = false;
-        this.failCount = 0;
-        this.relayUrl = targetUrl;
-        this.notifyServerStatus(true);
-        // Register peer ID with the relay server
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify({
-            type: 'register',
-            peerId: this.peerId,
-          }));
+    if (isMqtt) {
+      try {
+        if (this.mqttClient) {
+          try { this.mqttClient.end(true); } catch {}
+          this.mqttClient = null;
+        }
 
-          // Drain queued outgoing packets
-          while (this.outgoingWsQueue.length > 0) {
-            const item = this.outgoingWsQueue.shift();
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-              this.ws.send(JSON.stringify(item));
+        const safePeer = (this.peerId || 'peer').replace(/[^a-zA-Z0-9_-]/g, '');
+        const clientId = `auri_${safePeer}_${Math.random().toString(16).slice(2, 8)}`;
+
+        const client = mqtt.connect(targetUrl, {
+          clientId,
+          clean: true,
+          reconnectPeriod: 3000,
+          connectTimeout: 8000,
+        });
+        this.mqttClient = client;
+
+        client.on('connect', () => {
+          this.isConnecting = false;
+          this.failCount = 0;
+          this.relayUrl = targetUrl;
+          this.notifyServerStatus(true);
+
+          if (this.peerId) {
+            const cleanId = this.peerId.trim().toLowerCase();
+            client.subscribe(`auri/v1/peer/${cleanId}/inbox`, { qos: 1 });
+            if (cleanId !== this.peerId.trim()) {
+              client.subscribe(`auri/v1/peer/${this.peerId.trim()}/inbox`, { qos: 1 });
             }
           }
-        }
-      };
 
-      this.ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          this.handleRelayMessage(data);
-        } catch (err) {
-          console.error('Failed to parse WebSocket message:', err);
-        }
-      };
+          while (this.outgoingWsQueue.length > 0) {
+            const item = this.outgoingWsQueue.shift();
+            this.dispatchOutgoing(item);
+          }
+        });
 
-      this.ws.onclose = () => {
+        client.on('message', (_topic, payload) => {
+          try {
+            const data = JSON.parse(payload.toString());
+            this.handleRelayMessage(data);
+          } catch (err) {
+            console.error('Failed to parse MQTT message:', err);
+          }
+        });
+
+        client.on('close', () => {
+          this.isConnecting = false;
+          this.notifyServerStatus(false);
+        });
+
+        client.on('error', (err) => {
+          console.warn('MQTT connection error:', err?.message || err);
+          this.isConnecting = false;
+          this.failCount++;
+          this.notifyServerStatus(false);
+        });
+      } catch (err) {
         this.isConnecting = false;
         this.failCount++;
         this.notifyServerStatus(false);
         this.scheduleReconnect();
-      };
+      }
+    } else {
+      // Standard WebSocket fallback
+      try {
+        this.ws = new WebSocket(targetUrl);
 
-      this.ws.onerror = () => {
+        this.ws.onopen = () => {
+          this.isConnecting = false;
+          this.failCount = 0;
+          this.relayUrl = targetUrl;
+          this.notifyServerStatus(true);
+          // Register peer ID with the relay server
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+              type: 'register',
+              peerId: this.peerId,
+            }));
+
+            // Drain queued outgoing packets
+            while (this.outgoingWsQueue.length > 0) {
+              const item = this.outgoingWsQueue.shift();
+              this.dispatchOutgoing(item);
+            }
+          }
+        };
+
+        this.ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            this.handleRelayMessage(data);
+          } catch (err) {
+            console.error('Failed to parse WebSocket message:', err);
+          }
+        };
+
+        this.ws.onclose = () => {
+          this.isConnecting = false;
+          this.failCount++;
+          this.notifyServerStatus(false);
+          this.scheduleReconnect();
+        };
+
+        this.ws.onerror = () => {
+          this.isConnecting = false;
+          this.failCount++;
+          this.notifyServerStatus(false);
+        };
+      } catch {
         this.isConnecting = false;
         this.failCount++;
         this.notifyServerStatus(false);
-      };
-    } catch {
-      this.isConnecting = false;
-      this.failCount++;
-      this.notifyServerStatus(false);
-      this.scheduleReconnect();
+        this.scheduleReconnect();
+      }
     }
   }
 
@@ -228,6 +306,10 @@ class NetworkService {
 
   public disconnect() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.mqttClient) {
+      try { this.mqttClient.end(true); } catch {}
+      this.mqttClient = null;
+    }
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -239,14 +321,32 @@ class NetworkService {
   }
 
   private sendWs(payload: any) {
+    if (this.dispatchOutgoing(payload)) {
+      return;
+    }
+    this.outgoingWsQueue.push(payload);
+    if (!this.isConnecting) {
+      this.connectRelay();
+    }
+  }
+
+  private dispatchOutgoing(payload: any): boolean {
+    if (this.mqttClient && this.mqttClient.connected) {
+      const target = (payload.targetPeerId || '').trim().toLowerCase();
+      if (target) {
+        const topic = `auri/v1/peer/${target}/inbox`;
+        this.mqttClient.publish(topic, JSON.stringify(payload), { qos: 1 });
+        return true;
+      }
+      return true; // No recipient needed (e.g. registration packet)
+    }
+
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(payload));
-    } else {
-      this.outgoingWsQueue.push(payload);
-      if (!this.isConnecting && (!this.ws || this.ws.readyState === WebSocket.CLOSED)) {
-        this.connectRelay();
-      }
+      return true;
     }
+
+    return false;
   }
 
   // Handle incoming signaling and relay packets
@@ -280,7 +380,8 @@ class NetworkService {
         break;
       }
 
-      case 'chat-message': {
+      case 'chat-message':
+      case 'relay-message': {
         const { senderPeerId, message, senderProfile } = data;
         if (senderProfile && senderPeerId) {
           this.notifyPeerProfileUpdate(senderPeerId, senderProfile);
@@ -539,7 +640,10 @@ class NetworkService {
       }
     }
 
-    // Fallback: Send through ephemeral zero-retention relay
+    // Always attempt direct WebRTC P2P channel establishment in background
+    this.initiateWebRTC(targetPeerId).catch(() => {});
+
+    // Fallback: Send through 24/7 cloud broker relay
     this.sendWs({
       type: 'relay-message',
       targetPeerId: targetPeerId.trim(),
