@@ -16,6 +16,7 @@ export interface PeerProfileData {
 export type PeerProfileUpdateHandler = (peerId: string, profile: PeerProfileData) => void;
 export type ReactionReceivedHandler = (messageId: string, emoji: string, senderPeerId: string) => void;
 export type MessageDeletedHandler = (messageId: string) => void;
+export type ConnectHandshakeHandler = (senderPeerId: string, senderProfile?: PeerProfileData) => void;
 
 interface PeerRTCState {
   pc: RTCPeerConnection;
@@ -30,6 +31,10 @@ const ICE_SERVERS: RTCConfiguration = {
     { urls: 'stun:stun2.l.google.com:19302' },
   ],
 };
+
+export function normalizePeerId(id: string): string {
+  return (id || '').trim().replace(/^@/, '').toLowerCase();
+}
 
 class NetworkService {
   private ws: WebSocket | null = null;
@@ -63,6 +68,8 @@ class NetworkService {
   private onPeerProfileUpdateCallbacks: Set<PeerProfileUpdateHandler> = new Set();
   private onReactionCallbacks: Set<ReactionReceivedHandler> = new Set();
   private onMessageDeletedCallbacks: Set<MessageDeletedHandler> = new Set();
+  private onConnectHandshakeCallbacks: Set<ConnectHandshakeHandler> = new Set();
+  private processedMessageIds: Set<string> = new Set();
 
   public getIsConnecting(): boolean {
     return this.isConnecting;
@@ -80,10 +87,10 @@ class NetworkService {
     if (this.peerId !== newPeerId) {
       this.peerId = newPeerId;
       if (this.mqttClient && this.mqttClient.connected) {
-        const cleanId = this.peerId.trim().toLowerCase();
-        this.mqttClient.subscribe(`auri/v1/peer/${cleanId}/inbox`, { qos: 1 });
-        if (cleanId !== this.peerId.trim()) {
-          this.mqttClient.subscribe(`auri/v1/peer/${this.peerId.trim()}/inbox`, { qos: 1 });
+        const cleanId = normalizePeerId(this.peerId);
+        if (cleanId) {
+          this.mqttClient.subscribe(`auri/v1/peer/${cleanId}/inbox`, { qos: 1 });
+          this.mqttClient.subscribe(`auri/v1/peer/${cleanId}/msg/+`, { qos: 1 });
         }
       } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.sendWs({
@@ -203,10 +210,10 @@ class NetworkService {
           this.notifyServerStatus(true);
 
           if (this.peerId) {
-            const cleanId = this.peerId.trim().toLowerCase();
-            client.subscribe(`auri/v1/peer/${cleanId}/inbox`, { qos: 1 });
-            if (cleanId !== this.peerId.trim()) {
-              client.subscribe(`auri/v1/peer/${this.peerId.trim()}/inbox`, { qos: 1 });
+            const cleanId = normalizePeerId(this.peerId);
+            if (cleanId) {
+              client.subscribe(`auri/v1/peer/${cleanId}/inbox`, { qos: 1 });
+              client.subscribe(`auri/v1/peer/${cleanId}/msg/+`, { qos: 1 });
             }
           }
 
@@ -216,9 +223,16 @@ class NetworkService {
           }
         });
 
-        client.on('message', (_topic, payload) => {
+        client.on('message', (topic, payload) => {
+          if (!payload || payload.length === 0) return;
           try {
             const data = JSON.parse(payload.toString());
+
+            // If this was a retained message on a msg/+ topic, immediately clear it on the broker
+            if (topic.includes('/msg/')) {
+              client.publish(topic, '', { retain: true, qos: 1 });
+            }
+
             this.handleRelayMessage(data);
           } catch (err) {
             console.error('Failed to parse MQTT message:', err);
@@ -332,10 +346,36 @@ class NetworkService {
 
   private dispatchOutgoing(payload: any): boolean {
     if (this.mqttClient && this.mqttClient.connected) {
-      const target = (payload.targetPeerId || '').trim().toLowerCase();
+      const target = normalizePeerId(payload.targetPeerId);
       if (target) {
-        const topic = `auri/v1/peer/${target}/inbox`;
-        this.mqttClient.publish(topic, JSON.stringify(payload), { qos: 1 });
+        // 1. Live real-time inbox for instant delivery if online
+        const inboxTopic = `auri/v1/peer/${target}/inbox`;
+        this.mqttClient.publish(inboxTopic, JSON.stringify(payload), { qos: 1 });
+
+        // 2. Retained store-and-forward topic for offline messages & handshakes
+        if (payload.type === 'chat-message' || payload.type === 'relay-message') {
+          const msgId = payload.message?.id || `msg_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`;
+          const retainedTopic = `auri/v1/peer/${target}/msg/${msgId}`;
+          const str = JSON.stringify(payload);
+          if (str.length < 250000) {
+            this.mqttClient.publish(retainedTopic, str, { qos: 1, retain: true });
+          } else {
+            const stripped = {
+              ...payload,
+              message: {
+                ...payload.message,
+                mediaBase64: undefined,
+                content: payload.message.content || `📎 Large file (${payload.message.fileName || 'file'})`,
+              },
+            };
+            this.mqttClient.publish(retainedTopic, JSON.stringify(stripped), { qos: 1, retain: true });
+          }
+        } else if (payload.type === 'connect-handshake') {
+          const safeSender = normalizePeerId(payload.senderPeerId || 'peer');
+          const handshakeTopic = `auri/v1/peer/${target}/msg/handshake_${safeSender}`;
+          this.mqttClient.publish(handshakeTopic, JSON.stringify(payload), { qos: 1, retain: true });
+        }
+
         return true;
       }
       return true; // No recipient needed (e.g. registration packet)
@@ -380,9 +420,57 @@ class NetworkService {
         break;
       }
 
+      case 'connect-handshake': {
+        const { senderPeerId, senderProfile } = data;
+        if (senderPeerId) {
+          this.notifyConnectHandshake(senderPeerId, senderProfile);
+          if (this.myProfile) {
+            this.sendWs({
+              type: 'connect-handshake-ack',
+              targetPeerId: senderPeerId.trim(),
+              senderPeerId: this.peerId.trim(),
+              senderProfile: {
+                displayName: this.myProfile.displayName,
+                avatarColor: this.myProfile.avatarColor,
+                avatarImage: this.myProfile.avatarImage,
+                bio: this.myProfile.bio,
+              },
+            });
+          }
+        }
+        break;
+      }
+
+      case 'connect-handshake-ack': {
+        const { senderPeerId, senderProfile } = data;
+        if (senderPeerId) {
+          this.notifyConnectHandshake(senderPeerId, senderProfile);
+        }
+        break;
+      }
+
       case 'chat-message':
       case 'relay-message': {
         const { senderPeerId, message, senderProfile } = data;
+        if (message?.id) {
+          if (this.processedMessageIds.has(message.id)) {
+            // Already delivered! Still ACK so sender knows it's delivered
+            this.sendWs({
+              type: 'message-ack',
+              targetPeerId: senderPeerId.trim(),
+              senderPeerId: this.peerId.trim(),
+              messageId: message.id,
+              status: 'delivered',
+            });
+            break;
+          }
+          this.processedMessageIds.add(message.id);
+          if (this.processedMessageIds.size > 2000) {
+            const first = this.processedMessageIds.values().next().value;
+            if (first) this.processedMessageIds.delete(first);
+          }
+        }
+
         if (senderProfile && senderPeerId) {
           this.notifyPeerProfileUpdate(senderPeerId, senderProfile);
         }
@@ -626,24 +714,26 @@ class NetworkService {
     } : undefined;
 
     const state = this.getPeerState(targetPeerId);
+    let sentViaP2P = false;
     if (state && state.dataChannel && state.dataChannel.readyState === 'open') {
-      // Direct WebRTC Data Channel available! Zero-hop, zero-server
       try {
         state.dataChannel.send(JSON.stringify({
           type: 'chat-message',
           message: serializedMessage,
           senderProfile: senderProfilePayload,
         }));
-        return 'direct-p2p';
+        sentViaP2P = true;
       } catch {
-        // If data channel send fails, fall through to relay
+        sentViaP2P = false;
       }
     }
 
     // Always attempt direct WebRTC P2P channel establishment in background
     this.initiateWebRTC(targetPeerId).catch(() => {});
 
-    // Fallback: Send through 24/7 cloud broker relay
+    // Always dispatch through 24/7 cloud broker relay as well.
+    // This guarantees that if the recipient's phone went to sleep, turned off, or app closed,
+    // the MQTT broker retains the message and delivers it the moment they open the app!
     this.sendWs({
       type: 'relay-message',
       targetPeerId: targetPeerId.trim(),
@@ -651,7 +741,7 @@ class NetworkService {
       message: serializedMessage,
       senderProfile: senderProfilePayload,
     });
-    return 'ephemeral-relay';
+    return sentViaP2P ? 'direct-p2p' : 'ephemeral-relay';
   }
 
   public sendTyping(targetPeerId: string, isTyping: boolean) {
@@ -715,6 +805,17 @@ class NetworkService {
   }
 
   private processIncomingMessage(rawMsg: any, senderPeerId: string, _mode: ConnectionMode) {
+    if (rawMsg?.id) {
+      if (this.processedMessageIds.has(rawMsg.id)) {
+        return; // Already processed and notified!
+      }
+      this.processedMessageIds.add(rawMsg.id);
+      if (this.processedMessageIds.size > 2000) {
+        const first = this.processedMessageIds.values().next().value;
+        if (first) this.processedMessageIds.delete(first);
+      }
+    }
+
     const message: Message = { ...rawMsg };
 
     // Convert Base64 back to Blob for local IndexedDB storage
@@ -787,6 +888,33 @@ class NetworkService {
       senderPeerId: this.peerId.trim(),
       messageId,
     });
+
+    // 3. Clear retained offline message on broker if pending
+    if (this.mqttClient && this.mqttClient.connected) {
+      this.mqttClient.publish(`auri/v1/peer/${cleanTarget.toLowerCase()}/msg/${messageId}`, '', { retain: true, qos: 1 });
+    }
+  }
+
+  public onConnectHandshake(cb: ConnectHandshakeHandler): () => void {
+    this.onConnectHandshakeCallbacks.add(cb);
+    return () => this.onConnectHandshakeCallbacks.delete(cb);
+  }
+
+  public sendConnectHandshake(targetPeerId: string) {
+    const cleanTarget = (targetPeerId || '').trim();
+    if (!cleanTarget) return;
+
+    this.sendWs({
+      type: 'connect-handshake',
+      targetPeerId: cleanTarget,
+      senderPeerId: this.peerId.trim(),
+      senderProfile: this.myProfile ? {
+        displayName: this.myProfile.displayName,
+        avatarColor: this.myProfile.avatarColor,
+        avatarImage: this.myProfile.avatarImage,
+        bio: this.myProfile.bio,
+      } : undefined,
+    });
   }
 
   public onServerStatus(cb: ServerConnectionHandler) {
@@ -824,6 +952,10 @@ class NetworkService {
 
   private notifyMessageDeleted(messageId: string) {
     this.onMessageDeletedCallbacks.forEach(cb => cb(messageId));
+  }
+
+  private notifyConnectHandshake(senderPeerId: string, senderProfile?: PeerProfileData) {
+    this.onConnectHandshakeCallbacks.forEach(cb => cb(senderPeerId, senderProfile));
   }
 }
 

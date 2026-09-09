@@ -146,6 +146,7 @@ export const App: React.FC = () => {
           setActiveConversationId(targetConvo.id);
           network.initiateWebRTC(cleanUser).catch(console.warn);
           network.sendProfileUpdateToPeer(cleanUser);
+          network.sendConnectHandshake(cleanUser);
 
           // If viewing on mobile browser, prompt and attempt 1-tap launch of installed Auri APK
           if (!Capacitor.isNativePlatform() && /Android/i.test(navigator.userAgent)) {
@@ -239,6 +240,7 @@ export const App: React.FC = () => {
               setActiveConversationId(found.id);
               network.initiateWebRTC(cleanUser).catch(console.warn);
               network.sendProfileUpdateToPeer(cleanUser);
+              network.sendConnectHandshake(cleanUser);
             }
           }
         } catch (e) {
@@ -299,14 +301,14 @@ export const App: React.FC = () => {
                || await getConversation(incomingMsg.conversationId);
 
       if (!convo) {
-        const cleanSender = (senderPeerId || '').trim();
+        const cleanSender = (senderPeerId || '').trim().replace(/^@/, '');
         const defaultName = cleanSender.toUpperCase().startsWith('AND')
           ? 'Android Phone'
           : cleanSender.toUpperCase().startsWith('WIN')
             ? 'Windows PC'
             : cleanSender;
 
-        convo = {
+        const newConvo: Conversation = {
           id: canonicalConvoId,
           peerId: cleanSender,
           peerName: defaultName,
@@ -314,7 +316,10 @@ export const App: React.FC = () => {
           updatedAt: incomingMsg.timestamp,
           connectionMode: 'ephemeral-relay',
         };
-        await saveConversation(convo);
+        await saveConversation(newConvo);
+        conversationsRef.current = [newConvo, ...conversationsRef.current.filter((c) => c.id !== newConvo.id)];
+        setConversations(conversationsRef.current);
+        convo = newConvo;
       }
 
       // Ensure message conversationId matches local conversation
@@ -399,24 +404,16 @@ export const App: React.FC = () => {
     });
 
     const unsubProfile = network.onPeerProfileUpdate(async (peerId, updatedProfile) => {
-      setConversations((prev) =>
-        prev.map((c) => {
-          if (c.peerId.toLowerCase() === peerId.toLowerCase()) {
-            return {
-              ...c,
-              peerName: updatedProfile.displayName || c.peerName,
-              peerAvatar: updatedProfile.avatarColor || c.peerAvatar,
-              peerAvatarImage: updatedProfile.avatarImage !== undefined ? updatedProfile.avatarImage : c.peerAvatarImage,
-              peerBio: updatedProfile.bio !== undefined ? updatedProfile.bio : c.peerBio,
-            };
-          }
-          return c;
-        })
-      );
+      const myId = profileRef.current?.peerId || '';
+      if (!myId || peerId.trim().toLowerCase() === myId.trim().toLowerCase()) return;
+      const normSender = peerId.trim().toLowerCase();
+      const canonicalConvoId = getCanonicalConvoId(myId, peerId);
 
-      const convo = conversationsRef.current.find(
-        (c) => c.peerId.toLowerCase() === peerId.toLowerCase()
-      );
+      const currentConvos = conversationsRef.current;
+      let convo = currentConvos.find((c) => c.peerId.trim().toLowerCase() === normSender)
+               || currentConvos.find((c) => c.id.toLowerCase() === canonicalConvoId.toLowerCase())
+               || await getConversation(canonicalConvoId);
+
       if (convo) {
         const toSave: Conversation = {
           ...convo,
@@ -426,7 +423,96 @@ export const App: React.FC = () => {
           peerBio: updatedProfile.bio !== undefined ? updatedProfile.bio : convo.peerBio,
         };
         await saveConversation(toSave);
+        conversationsRef.current = conversationsRef.current.map((c) => (c.id === convo.id ? toSave : c));
+        setConversations(conversationsRef.current);
+      } else {
+        const cleanSender = peerId.trim().replace(/^@/, '');
+        const defaultName = cleanSender.toUpperCase().startsWith('AND')
+          ? 'Android Phone'
+          : cleanSender.toUpperCase().startsWith('WIN')
+            ? 'Windows PC'
+            : cleanSender;
+
+        const newConvo: Conversation = {
+          id: canonicalConvoId,
+          peerId: cleanSender,
+          peerName: updatedProfile.displayName || defaultName,
+          peerAvatar: updatedProfile.avatarColor || '#0ea5e9',
+          peerAvatarImage: updatedProfile.avatarImage,
+          peerBio: updatedProfile.bio,
+          unreadCount: 0,
+          updatedAt: Date.now(),
+          connectionMode: 'ephemeral-relay',
+        };
+        await saveConversation(newConvo);
+        conversationsRef.current = [newConvo, ...conversationsRef.current.filter((c) => c.id !== newConvo.id)];
+        setConversations(conversationsRef.current);
       }
+    });
+
+    const unsubHandshake = network.onConnectHandshake(async (senderPeerId, senderProfile) => {
+      if (!senderPeerId) return;
+      const myId = profileRef.current?.peerId || '';
+      if (!myId || senderPeerId.trim().toLowerCase() === myId.trim().toLowerCase()) return;
+
+      const normSender = senderPeerId.trim().toLowerCase();
+      const canonicalConvoId = getCanonicalConvoId(myId, senderPeerId);
+
+      const currentConvos = conversationsRef.current;
+      let convo = currentConvos.find((c) => c.peerId.trim().toLowerCase() === normSender)
+               || currentConvos.find((c) => c.id.toLowerCase() === canonicalConvoId.toLowerCase())
+               || await getConversation(canonicalConvoId);
+
+      if (!convo) {
+        const cleanSender = senderPeerId.trim().replace(/^@/, '');
+        const defaultName = cleanSender.toUpperCase().startsWith('AND')
+          ? 'Android Phone'
+          : cleanSender.toUpperCase().startsWith('WIN')
+            ? 'Windows PC'
+            : cleanSender;
+
+        const newConvo: Conversation = {
+          id: canonicalConvoId,
+          peerId: cleanSender,
+          peerName: senderProfile?.displayName || defaultName,
+          peerAvatar: senderProfile?.avatarColor || '#0ea5e9',
+          peerAvatarImage: senderProfile?.avatarImage,
+          peerBio: senderProfile?.bio,
+          unreadCount: 0,
+          updatedAt: Date.now(),
+          connectionMode: 'ephemeral-relay',
+        };
+        await saveConversation(newConvo);
+        conversationsRef.current = [newConvo, ...conversationsRef.current.filter((c) => c.id !== newConvo.id)];
+        setConversations(conversationsRef.current);
+
+        // Alert user that a peer has connected via link!
+        notifications.playChime();
+        setInAppToast({
+          senderName: newConvo.peerName,
+          content: 'Connected via invite link!',
+          conversationId: newConvo.id,
+        });
+        if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = setTimeout(() => setInAppToast(null), 4000);
+      } else {
+        if (senderProfile) {
+          const updated: Conversation = {
+            ...convo,
+            peerName: senderProfile.displayName || convo.peerName,
+            peerAvatar: senderProfile.avatarColor || convo.peerAvatar,
+            peerAvatarImage: senderProfile.avatarImage !== undefined ? senderProfile.avatarImage : convo.peerAvatarImage,
+            peerBio: senderProfile.bio !== undefined ? senderProfile.bio : convo.peerBio,
+          };
+          await saveConversation(updated);
+          conversationsRef.current = conversationsRef.current.map((c) => (c.id === convo.id ? updated : c));
+          setConversations(conversationsRef.current);
+        }
+      }
+
+      // Automatically initiate WebRTC and respond with our profile
+      network.initiateWebRTC(senderPeerId).catch(() => {});
+      network.sendProfileUpdateToPeer(senderPeerId);
     });
 
     const unsubServer = network.onServerStatus((connected) => {
@@ -456,6 +542,7 @@ export const App: React.FC = () => {
       unsubMode();
       unsubTyping();
       unsubProfile();
+      unsubHandshake();
       unsubServer();
       unsubReaction();
       unsubDeleted();
@@ -620,10 +707,12 @@ export const App: React.FC = () => {
       handleSelectConversation(canonicalConvoId);
       network.initiateWebRTC(cleanId).catch(console.warn);
       network.sendProfileUpdateToPeer(cleanId);
+      network.sendConnectHandshake(cleanId);
     } else {
       handleSelectConversation(existing.id);
       network.initiateWebRTC(existing.peerId).catch(console.warn);
       network.sendProfileUpdateToPeer(existing.peerId);
+      network.sendConnectHandshake(existing.peerId);
     }
   };
 

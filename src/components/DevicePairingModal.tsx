@@ -64,7 +64,18 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({
 
   const handleConnectSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanId = targetPeerId.trim().replace(/^@/, '');
+    let cleanId = targetPeerId.trim();
+    try {
+      if (cleanId.includes('?') || cleanId.includes('/')) {
+        const urlObj = new URL(cleanId.startsWith('http') || cleanId.startsWith('auri') ? cleanId : `https://${cleanId}`);
+        const param = urlObj.searchParams.get('user') || urlObj.searchParams.get('connect') || urlObj.searchParams.get('id');
+        if (param) cleanId = param;
+      }
+    } catch {
+      const match = cleanId.match(/[?&](?:user|connect|id)=([^&#]+)/);
+      if (match && match[1]) cleanId = decodeURIComponent(match[1]);
+    }
+    cleanId = cleanId.replace(/^@/, '').trim();
     if (!cleanId) return;
 
     const defaultName = cleanId.startsWith('AND') ? 'Android Phone' : cleanId.startsWith('WIN') ? 'Windows PC' : cleanId;

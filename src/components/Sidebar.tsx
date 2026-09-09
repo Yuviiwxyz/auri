@@ -10,6 +10,7 @@ import {
 import type { Conversation, UserProfile } from '../types';
 
 import { notifications } from '../services/notifications';
+import { shareInviteLink } from '../utils/url';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -34,6 +35,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [notifPerm, setNotifPerm] = useState(notifications.getPermission());
+  const [copiedLink, setCopiedLink] = useState<boolean>(false);
 
   const filteredConversations = conversations.filter((c) => {
     const q = searchQuery.toLowerCase();
@@ -260,15 +262,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             type="button"
             className="copy-my-id-btn"
-            onClick={(e) => {
+            onClick={async (e) => {
               e.stopPropagation();
-              const accountLink = `${window.location.origin}${window.location.pathname}?user=${encodeURIComponent(profile.peerId)}`;
-              navigator.clipboard.writeText(accountLink);
-              alert(`Account link copied to clipboard!\n${accountLink}`);
+              const res = await shareInviteLink(profile.peerId, profile.displayName);
+              if (res.copied) {
+                setCopiedLink(true);
+                setTimeout(() => setCopiedLink(false), 2000);
+              }
             }}
-            title="Copy shareable account link"
+            title="Share account invite link"
           >
-            Share
+            {copiedLink ? 'Copied!' : 'Share'}
           </button>
         </div>
       )}

@@ -12,6 +12,7 @@ import {
   Info,
 } from 'lucide-react';
 import type { Conversation } from '../types';
+import { shareInviteLink } from '../utils/url';
 
 interface PeerProfileModalProps {
   isOpen: boolean;
@@ -33,17 +34,11 @@ export const PeerProfileModal: React.FC<PeerProfileModalProps> = ({
 
   const isAndroid = conversation.peerId.toUpperCase().startsWith('AND');
 
-  const shareableUrl = `${window.location.origin}${window.location.pathname}?user=${encodeURIComponent(
-    conversation.peerId
-  )}`;
-
   const handleCopyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(shareableUrl);
+    const res = await shareInviteLink(conversation.peerId, conversation.peerName);
+    if (res.copied || res.shared) {
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2200);
-    } catch {
-      // Fallback
     }
   };
 
