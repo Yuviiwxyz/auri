@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#38bdf8" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="description" content="Auri • Private, local-first cross-platform chat on Android & Windows with Frutiger Aero aesthetics." />
+    <title>Auri • Local-First Android & Windows</title>
+    <link rel="icon" type="image/png" href="./favicon.png" />
+    <link rel="alternate icon" href="./favicon.ico" />
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="apple-touch-icon" href="./pwa-192x192.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+      (function() {
+        try {
+          var params = new URLSearchParams(window.location.search);
+          var user = params.get('user') || params.get('connect') || params.get('id');
+          var isAndroid = /Android/i.test(navigator.userAgent);
+          var isNativeCapacitor = window.location.origin.startsWith('capacitor:') || /Capacitor/i.test(navigator.userAgent);
+          if (isAndroid && user && !isNativeCapacitor) {
+            var clean = encodeURIComponent(user.trim().replace(/^@/, ''));
+            var intentUri = 'intent://chat?user=' + clean + '#Intent;scheme=auri;package=com.auri.chat;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end';
+            window.location.href = intentUri;
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <script type="module" crossorigin src="./assets/index-DQ2a7TiS.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-z46tT6ST.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
