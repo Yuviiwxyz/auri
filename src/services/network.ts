@@ -147,17 +147,31 @@ class NetworkService {
     }
   }
 
+  private failCount: number = 0;
+  private readonly fallbackRelays = [
+    'ws://10.124.119.104:3001',
+    'wss://auri-chat-app.onrender.com/relay',
+  ];
+
   public connectRelay() {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
+    let targetUrl = this.relayUrl || 'ws://10.124.119.104:3001';
+    if (this.failCount >= 2) {
+      const alt = this.fallbackRelays.find((u) => u !== this.relayUrl) || this.fallbackRelays[0];
+      targetUrl = alt;
+    }
+
     this.isConnecting = true;
     try {
-      this.ws = new WebSocket(this.relayUrl);
+      this.ws = new WebSocket(targetUrl);
 
       this.ws.onopen = () => {
         this.isConnecting = false;
+        this.failCount = 0;
+        this.relayUrl = targetUrl;
         this.notifyServerStatus(true);
         // Register peer ID with the relay server
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -187,16 +201,19 @@ class NetworkService {
 
       this.ws.onclose = () => {
         this.isConnecting = false;
+        this.failCount++;
         this.notifyServerStatus(false);
         this.scheduleReconnect();
       };
 
       this.ws.onerror = () => {
         this.isConnecting = false;
+        this.failCount++;
         this.notifyServerStatus(false);
       };
     } catch {
       this.isConnecting = false;
+      this.failCount++;
       this.notifyServerStatus(false);
       this.scheduleReconnect();
     }
@@ -206,7 +223,7 @@ class NetworkService {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       this.connectRelay();
-    }, 3000);
+    }, 2500);
   }
 
   public disconnect() {

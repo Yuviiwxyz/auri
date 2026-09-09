@@ -146,6 +146,13 @@ export const App: React.FC = () => {
           network.initiateWebRTC(cleanUser).catch(console.warn);
           network.sendProfileUpdateToPeer(cleanUser);
 
+          // If viewing on mobile browser, attempt to launch installed Auri APK
+          if (!Capacitor.isNativePlatform() && /Android/i.test(navigator.userAgent)) {
+            try {
+              window.location.href = `auri://chat?user=${encodeURIComponent(cleanUser)}`;
+            } catch {}
+          }
+
           // Clean URL params so refresh keeps current state clean
           const cleanPath = window.location.pathname;
           window.history.replaceState({ view: 'chat', id: targetConvo.id }, '', cleanPath);
@@ -706,6 +713,45 @@ export const App: React.FC = () => {
 
   return (
     <div className="app-shell">
+      {/* Smart App Banner for Mobile Web Viewers */}
+      {!Capacitor.isNativePlatform() && (
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(14, 165, 233, 0.95), rgba(2, 132, 199, 0.95))',
+          color: '#ffffff',
+          padding: '8px 14px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          borderBottom: '1px solid rgba(255, 255, 255, 0.3)',
+          boxShadow: '0 2px 8px rgba(14, 165, 233, 0.25)',
+          zIndex: 9999,
+          position: 'relative'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <img src="./logo.png" alt="Auri" style={{ width: '28px', height: '28px', borderRadius: '7px', boxShadow: '0 2px 4px rgba(0,0,0,0.2)' }} />
+            <div>
+              <div style={{ fontWeight: '700', fontSize: '12px', lineHeight: '1.2' }}>Auri Messenger</div>
+              <div style={{ fontSize: '10px', opacity: 0.9 }}>Have the APK installed?</div>
+            </div>
+          </div>
+          <a
+            href={`auri://chat${window.location.search || ''}`}
+            style={{
+              background: '#ffffff',
+              color: '#0284c7',
+              fontWeight: '700',
+              fontSize: '11px',
+              padding: '5px 12px',
+              borderRadius: '16px',
+              textDecoration: 'none',
+              boxShadow: '0 2px 4px rgba(0, 0, 0, 0.15)'
+            }}
+          >
+            Open in App
+          </a>
+        </div>
+      )}
+
       {/* Ambient Frutiger Aero Atmosphere: Aqua Sheen, Pinstripes & Floating Bubbles */}
       <div className="aero-bubbles-container" aria-hidden="true">
         <div className="aero-pinstripes" />

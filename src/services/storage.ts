@@ -79,29 +79,30 @@ export function getDefaultRelayUrl(): string {
     const isCapacitor = (window as any).Capacitor?.isNativePlatform?.() || origin.startsWith('capacitor:');
     const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-    // If running on GitHub Pages (github.io), use the cloud relay server
-    if (window.location.host.endsWith('github.io')) {
-      return 'wss://auri-chat-app.onrender.com/relay';
-    }
-
-    // If running in live web browser on HTTPS (e.g. onrender, custom domain, or tunnel)
-    if (window.location.protocol === 'https:' && !isLocal && !isCapacitor) {
-      return `wss://${window.location.host}/relay`;
-    }
-
-    // If running in browser on local machine
-    if (isLocal && !isCapacitor) {
-      return `ws://${window.location.hostname || 'localhost'}:3001`;
-    }
-
-    // If running in Android APK with custom domain set
+    // If custom cloud domain is saved by user in Settings
     const savedDomain = localStorage.getItem('auri_custom_domain');
     if (savedDomain && savedDomain.trim()) {
       const host = savedDomain.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
       return `wss://${host}/relay`;
     }
+
+    // If running in Android APK: connect directly to dev server IP
+    if (isCapacitor) {
+      return 'ws://10.124.119.104:3001';
+    }
+
+    // If running in browser on local machine
+    if (isLocal) {
+      return `ws://${window.location.hostname || 'localhost'}:3001`;
+    }
+
+    // If running on custom HTTPS domain (e.g. onrender, tunnel)
+    if (window.location.protocol === 'https:' && !window.location.host.endsWith('github.io')) {
+      return `wss://${window.location.host}/relay`;
+    }
   }
-  return 'wss://auri-chat-app.onrender.com/relay';
+  // Default to active dev server relay
+  return 'ws://10.124.119.104:3001';
 }
 
 // Profile storage
