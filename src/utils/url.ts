@@ -5,7 +5,7 @@
  */
 
 // Default fallback permanent domain
-export const DEFAULT_PERMANENT_DOMAIN = 'https://auri-chat.onrender.com';
+export const DEFAULT_PERMANENT_DOMAIN = 'https://yuviiwxyz.github.io/auri';
 
 /**
  * Returns the public domain to be used for invite links and QR codes.

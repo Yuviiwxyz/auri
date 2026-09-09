@@ -79,7 +79,12 @@ export function getDefaultRelayUrl(): string {
     const isCapacitor = (window as any).Capacitor?.isNativePlatform?.() || origin.startsWith('capacitor:');
     const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-    // If running in live web browser on HTTPS (e.g. cloudflare tunnel, custom domain, or onrender)
+    // If running on GitHub Pages (github.io), use the cloud relay server
+    if (window.location.host.endsWith('github.io')) {
+      return 'wss://auri-chat-app.onrender.com/relay';
+    }
+
+    // If running in live web browser on HTTPS (e.g. onrender, custom domain, or tunnel)
     if (window.location.protocol === 'https:' && !isLocal && !isCapacitor) {
       return `wss://${window.location.host}/relay`;
     }
@@ -89,14 +94,14 @@ export function getDefaultRelayUrl(): string {
       return `ws://${window.location.hostname || 'localhost'}:3001`;
     }
 
-    // If running in Android APK
+    // If running in Android APK with custom domain set
     const savedDomain = localStorage.getItem('auri_custom_domain');
     if (savedDomain && savedDomain.trim()) {
       const host = savedDomain.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
       return `wss://${host}/relay`;
     }
   }
-  return 'wss://auri-chat.onrender.com/relay';
+  return 'wss://auri-chat-app.onrender.com/relay';
 }
 
 // Profile storage
