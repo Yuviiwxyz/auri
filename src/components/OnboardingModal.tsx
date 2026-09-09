@@ -133,7 +133,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         {/* Header Branding */}
         <div className="onboarding-header">
           <div className="onboarding-logo-badge">
-            <span className="onboarding-logo-icon">💬</span>
+            <img src="/logo.png" alt="Auri Logo" className="onboarding-logo-img" />
           </div>
           <h2 className="onboarding-title">Welcome to Auri</h2>
           <p className="onboarding-subtitle">

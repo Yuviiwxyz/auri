@@ -1,7 +1,12 @@
 /**
  * Cross-Platform System Notification Service
- * Supports Windows desktop notifications and Android browser / PWA notifications.
+ * Supports:
+ * - Native Android APK status-bar notifications with sound & vibration via @capacitor/local-notifications
+ * - Android browser / PWA notifications via ServiceWorker
+ * - Windows / Desktop notifications via HTML5 Web Notifications
  */
+import { Capacitor } from '@capacitor/core';
+import { LocalNotifications } from '@capacitor/local-notifications';
 
 export type NotificationPermissionState = 'granted' | 'denied' | 'default' | 'unsupported';
 
@@ -11,14 +16,50 @@ class NotificationService {
   private blinkInterval: any = null;
   private swRegistration: ServiceWorkerRegistration | null = null;
   private onNavigateCallback: ((convoId: string) => void) | null = null;
+  private channelInitialized: boolean = false;
 
   constructor() {
     this.initServiceWorker();
     this.listenForServiceWorkerMessages();
+    this.initNativeListeners();
+  }
+
+  private async initNativeListeners() {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await this.ensureNotificationChannel();
+        LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
+          const convoId = action.notification.extra?.conversationId;
+          if (convoId && this.onNavigateCallback) {
+            this.onNavigateCallback(convoId);
+          }
+        });
+      } catch (err) {
+        console.warn('Native notification listener init error:', err);
+      }
+    }
+  }
+
+  private async ensureNotificationChannel() {
+    if (this.channelInitialized || !Capacitor.isNativePlatform()) return;
+    try {
+      await LocalNotifications.createChannel({
+        id: 'auri_messages',
+        name: 'Auri Messages',
+        description: 'Direct notifications for incoming chat messages and calls',
+        importance: 5, // High importance (heads-up notification)
+        visibility: 1, // Public on lockscreen
+        vibration: true,
+        lights: true,
+      });
+      this.channelInitialized = true;
+    } catch (e) {
+      console.warn('Could not create notification channel:', e);
+    }
   }
 
   public async initServiceWorker(): Promise<ServiceWorkerRegistration | null> {
-    if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+    if (!Capacitor.isNativePlatform() && typeof window !== 'undefined' && 'serviceWorker' in navigator) {
       try {
         const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
         this.swRegistration = reg;
@@ -31,7 +72,7 @@ class NotificationService {
   }
 
   private listenForServiceWorkerMessages() {
-    if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+    if (!Capacitor.isNativePlatform() && typeof window !== 'undefined' && 'serviceWorker' in navigator) {
       navigator.serviceWorker.addEventListener('message', (event) => {
         if (event.data && event.data.type === 'NAVIGATE_CONVERSATION') {
           if (this.onNavigateCallback) {
@@ -47,15 +88,29 @@ class NotificationService {
   }
 
   public isSupported(): boolean {
+    if (Capacitor.isNativePlatform()) return true;
     return typeof window !== 'undefined' && 'Notification' in window;
   }
 
   public getPermission(): NotificationPermissionState {
+    if (Capacitor.isNativePlatform()) {
+      return 'granted'; // Will check dynamically on schedule
+    }
     if (!this.isSupported()) return 'unsupported';
     return Notification.permission;
   }
 
   public async requestPermission(): Promise<boolean> {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await this.ensureNotificationChannel();
+        const res = await LocalNotifications.requestPermissions();
+        return res.display === 'granted';
+      } catch {
+        return false;
+      }
+    }
+
     if (!this.isSupported()) return false;
     try {
       const result = await Notification.requestPermission();
@@ -132,24 +187,46 @@ class NotificationService {
     // 1. Update Document Title Badge
     this.incrementTitleBadge(senderName);
 
-    // 2. Tactile Haptic Vibration for Mobile Devices
-    try {
-      if (typeof navigator !== 'undefined' && navigator.vibrate) {
-        navigator.vibrate([150, 80, 150]);
+    // 2. Play Audio & Haptic Chime
+    this.playChime();
+
+    // 3. Trigger Native Status-Bar / System Notification
+    const shouldNotify = document.hidden || !document.hasFocus() || !isViewingThisChat;
+
+    if (shouldNotify) {
+      const title = `New message from ${senderName}`;
+
+      // A. If Native Android APK (Capacitor): Use LocalNotifications for real status-bar tray alerts
+      if (Capacitor.isNativePlatform()) {
+        try {
+          await this.ensureNotificationChannel();
+          await LocalNotifications.schedule({
+            notifications: [
+              {
+                id: Math.floor(Math.random() * 1000000),
+                title,
+                body,
+                channelId: 'auri_messages',
+                smallIcon: 'ic_launcher_round',
+                extra: {
+                  conversationId: options.conversationId,
+                },
+              },
+            ],
+          });
+          return;
+        } catch (err) {
+          console.warn('Native local notification dispatch error:', err);
+        }
       }
-    } catch {}
 
-    // 3. Trigger Native OS/Browser Notification if permission granted and not actively viewing this chat
-    if (this.getPermission() === 'granted') {
-      const shouldNotify = document.hidden || !document.hasFocus() || !isViewingThisChat;
-
-      if (shouldNotify) {
-        const title = `New message from ${senderName}`;
+      // B. Web Browser Environment
+      if (this.getPermission() === 'granted') {
         const notificationOptions: any = {
           body,
-          icon: '/favicon.svg',
-          badge: '/favicon.svg',
-          tag: `airchat-${options.conversationId}`,
+          icon: '/logo.png',
+          badge: '/favicon.png',
+          tag: `auri-${options.conversationId}`,
           renotify: true,
           data: { conversationId: options.conversationId },
         };

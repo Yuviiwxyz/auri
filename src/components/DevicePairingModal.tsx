@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
-import { X, Copy, Check, QrCode, ArrowRight, Smartphone, Monitor, Camera } from 'lucide-react';
+import { X, Copy, Check, QrCode, ArrowRight, Smartphone, Monitor, Camera, Share2 } from 'lucide-react';
 import type { Conversation } from '../types';
 import { QRScannerModal } from './QRScannerModal';
+import { getShareUrl, shareInviteLink } from '../utils/url';
 
 interface DevicePairingModalProps {
   isOpen: boolean;
@@ -27,7 +28,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({
 
   useEffect(() => {
     if (isOpen && myPeerId) {
-      const accountUrl = `${window.location.origin}${window.location.pathname}?user=${encodeURIComponent(myPeerId)}`;
+      const accountUrl = getShareUrl(myPeerId);
 
       QRCode.toDataURL(accountUrl, {
         width: 240,
@@ -44,11 +45,21 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleCopyPeerId = () => {
-    const accountUrl = `${window.location.origin}${window.location.pathname}?user=${encodeURIComponent(myPeerId)}`;
-    navigator.clipboard.writeText(accountUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopyPeerId = async () => {
+    const accountUrl = getShareUrl(myPeerId);
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(accountUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handleShareInvite = async () => {
+    const result = await shareInviteLink(myPeerId);
+    if (result.copied) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleConnectSubmit = (e: React.FormEvent) => {
@@ -131,7 +142,16 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({
                   title="Copy Account Link"
                 >
                   {copied ? <Check size={16} /> : <Copy size={16} />}
-                  <span>{copied ? 'Copied Link!' : 'Copy Link'}</span>
+                  <span>{copied ? 'Copied!' : 'Copy'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="copy-peer-btn share-invite-btn"
+                  onClick={handleShareInvite}
+                  title="Share invite via WhatsApp, Messages, or social apps"
+                >
+                  <Share2 size={16} />
+                  <span>Share</span>
                 </button>
               </div>
 

@@ -21,6 +21,8 @@ import { DevicePairingModal } from './components/DevicePairingModal';
 import { SettingsModal } from './components/SettingsModal';
 import { OnboardingModal } from './components/OnboardingModal';
 import { notifications } from './services/notifications';
+import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
 
 export function getCanonicalConvoId(id1: string, id2: string): string {
   const a = (id1 || '').trim().toLowerCase();
@@ -182,6 +184,59 @@ export const App: React.FC = () => {
       window.removeEventListener('touchstart', unlockAudio);
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     };
+  }, []);
+
+  // Deep Link listener for Native Android APK (Capacitor)
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      const listenerPromise = CapApp.addListener('appUrlOpen', (data) => {
+        try {
+          let target: string | null = null;
+          try {
+            const urlObj = new URL(data.url);
+            target = urlObj.searchParams.get('user') || urlObj.searchParams.get('connect') || urlObj.searchParams.get('id');
+          } catch {
+            const match = data.url.match(/[?&](?:user|connect|id)=([^&]+)/);
+            if (match && match[1]) {
+              target = decodeURIComponent(match[1]);
+            }
+          }
+
+          if (target && profileRef.current) {
+            const cleanUser = target.trim().replace(/^@/, '');
+            if (cleanUser && cleanUser.toLowerCase() !== profileRef.current.peerId.toLowerCase()) {
+              const canonicalId = getCanonicalConvoId(profileRef.current.peerId, cleanUser);
+              let found = conversationsRef.current.find(
+                (c) => c.peerId.toLowerCase() === cleanUser.toLowerCase() || c.id.toLowerCase() === canonicalId.toLowerCase()
+              );
+              if (!found) {
+                const newConvo: Conversation = {
+                  id: canonicalId,
+                  peerId: cleanUser,
+                  peerName: cleanUser,
+                  peerAvatar: '#0ea5e9',
+                  unreadCount: 0,
+                  updatedAt: Date.now(),
+                  connectionMode: 'connecting',
+                };
+                saveConversation(newConvo).catch(console.error);
+                setConversations((prev) => [newConvo, ...prev.filter((c) => c.id !== newConvo.id)]);
+                found = newConvo;
+              }
+              setActiveConversationId(found.id);
+              network.initiateWebRTC(cleanUser).catch(console.warn);
+              network.sendProfileUpdateToPeer(cleanUser);
+            }
+          }
+        } catch (e) {
+          console.warn('Error handling deep link:', e);
+        }
+      });
+
+      return () => {
+        listenerPromise.then((handle) => handle.remove()).catch(() => {});
+      };
+    }
   }, []);
 
   // 2. Load Messages when active conversation changes
@@ -710,7 +765,9 @@ export const App: React.FC = () => {
         ) : (
           <div className="no-chat-selected">
             <div className="welcome-card">
-              <div className="welcome-app-icon">💬</div>
+              <div className="welcome-app-icon">
+                <img src="/logo.png" alt="Auri Logo" className="welcome-logo-img" />
+              </div>
               <h2>Auri Local-First</h2>
               <p>
                 Private cross-platform chat running seamlessly on <strong>Android</strong> and <strong>Windows</strong> across any distance.

@@ -70,12 +70,42 @@ const DEFAULT_AVATARS = [
   '#f59e0b', // Amber
 ];
 
+export function getDefaultRelayUrl(): string {
+  if (typeof window !== 'undefined') {
+    const isCapacitor = (window as any).Capacitor?.isNativePlatform?.() || window.location.origin.startsWith('capacitor:');
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+    // If running inside native Android APK, use the permanent cloud relay
+    if (isCapacitor) {
+      return 'wss://auri-chat.onrender.com/relay';
+    }
+
+    // If running in live web browser on HTTPS (e.g. auri-chat.onrender.com)
+    if (window.location.protocol === 'https:' && !isLocal) {
+      return `wss://${window.location.host}/relay`;
+    }
+
+    // If running in development on local machine
+    if (isLocal) {
+      return `ws://${window.location.hostname || 'localhost'}:3001`;
+    }
+  }
+  return 'wss://auri-chat.onrender.com/relay';
+}
+
 // Profile storage
 export async function getStoredProfile(): Promise<UserProfile> {
   const db = await getLocalDB();
   const allProfiles = await db.getAll('user_profile');
   if (allProfiles.length > 0) {
-    return allProfiles[0];
+    const profile = allProfiles[0];
+    const isCapacitor = typeof window !== 'undefined' && ((window as any).Capacitor?.isNativePlatform?.() || window.location.origin.startsWith('capacitor:'));
+    // Auto-heal invalid localhost relay if user installed APK
+    if (isCapacitor && (profile.relayUrl.includes('localhost') || profile.relayUrl.includes('127.0.0.1'))) {
+      profile.relayUrl = 'wss://auri-chat.onrender.com/relay';
+      await db.put('user_profile', profile);
+    }
+    return profile;
   }
 
   // Create initial default profile
@@ -84,9 +114,7 @@ export async function getStoredProfile(): Promise<UserProfile> {
     displayName: /Android/i.test(navigator.userAgent) ? 'Android User' : 'Windows User',
     avatarColor: DEFAULT_AVATARS[Math.floor(Math.random() * DEFAULT_AVATARS.length)],
     bio: 'Hey! I am using Auri Local-First ✨',
-    relayUrl: window.location.protocol === 'https:'
-      ? `wss://${window.location.host}`
-      : `ws://${window.location.hostname || 'localhost'}:3001`,
+    relayUrl: getDefaultRelayUrl(),
     soundEnabled: true,
     theme: 'dark',
     hasCompletedOnboarding: false,

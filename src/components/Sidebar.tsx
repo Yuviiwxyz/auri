@@ -62,7 +62,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div className="sidebar-header">
         <div className="app-branding">
           <div className="app-logo-badge">
-            <span className="app-logo-icon">💬</span>
+            <img src="/logo.png" alt="Auri Logo" className="app-logo-img" />
           </div>
           <div className="app-title-group">
             <h1 className="app-title">Auri</h1>
