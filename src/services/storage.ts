@@ -72,22 +72,28 @@ const DEFAULT_AVATARS = [
 
 export function getDefaultRelayUrl(): string {
   if (typeof window !== 'undefined') {
-    const isCapacitor = (window as any).Capacitor?.isNativePlatform?.() || window.location.origin.startsWith('capacitor:');
+    const savedCustom = localStorage.getItem('auri_custom_relay');
+    if (savedCustom && savedCustom.trim()) return savedCustom.trim();
+
+    const origin = window.location.origin;
+    const isCapacitor = (window as any).Capacitor?.isNativePlatform?.() || origin.startsWith('capacitor:');
     const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-    // If running inside native Android APK, use the permanent cloud relay
-    if (isCapacitor) {
-      return 'wss://auri-chat.onrender.com/relay';
-    }
-
-    // If running in live web browser on HTTPS (e.g. auri-chat.onrender.com)
-    if (window.location.protocol === 'https:' && !isLocal) {
+    // If running in live web browser on HTTPS (e.g. cloudflare tunnel, custom domain, or onrender)
+    if (window.location.protocol === 'https:' && !isLocal && !isCapacitor) {
       return `wss://${window.location.host}/relay`;
     }
 
-    // If running in development on local machine
-    if (isLocal) {
+    // If running in browser on local machine
+    if (isLocal && !isCapacitor) {
       return `ws://${window.location.hostname || 'localhost'}:3001`;
+    }
+
+    // If running in Android APK
+    const savedDomain = localStorage.getItem('auri_custom_domain');
+    if (savedDomain && savedDomain.trim()) {
+      const host = savedDomain.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      return `wss://${host}/relay`;
     }
   }
   return 'wss://auri-chat.onrender.com/relay';
@@ -95,16 +101,36 @@ export function getDefaultRelayUrl(): string {
 
 // Profile storage
 export async function getStoredProfile(): Promise<UserProfile> {
+  // 1. Check localStorage first for instant, synchronous retrieval
+  let cached: UserProfile | null = null;
+  try {
+    const raw = localStorage.getItem('auri_active_profile');
+    if (raw) cached = JSON.parse(raw);
+  } catch {}
+
   const db = await getLocalDB();
   const allProfiles = await db.getAll('user_profile');
-  if (allProfiles.length > 0) {
-    const profile = allProfiles[0];
-    const isCapacitor = typeof window !== 'undefined' && ((window as any).Capacitor?.isNativePlatform?.() || window.location.origin.startsWith('capacitor:'));
-    // Auto-heal invalid localhost relay if user installed APK
-    if (isCapacitor && (profile.relayUrl.includes('localhost') || profile.relayUrl.includes('127.0.0.1'))) {
-      profile.relayUrl = 'wss://auri-chat.onrender.com/relay';
-      await db.put('user_profile', profile);
+
+  if (cached) {
+    // If DB is out of sync or has old entries, sync it now
+    if (allProfiles.length !== 1 || allProfiles[0].peerId !== cached.peerId) {
+      const tx = db.transaction('user_profile', 'readwrite');
+      await tx.objectStore('user_profile').clear();
+      await tx.objectStore('user_profile').put(cached);
+      await tx.done;
     }
+    return cached;
+  }
+
+  if (allProfiles.length > 0) {
+    // Return the latest profile and cache in localStorage
+    const profile = allProfiles[allProfiles.length - 1];
+    try {
+      localStorage.setItem('auri_active_profile', JSON.stringify(profile));
+      if (profile.hasCompletedOnboarding) {
+        localStorage.setItem('auri_onboarding_completed', 'true');
+      }
+    } catch {}
     return profile;
   }
 
@@ -120,13 +146,25 @@ export async function getStoredProfile(): Promise<UserProfile> {
     hasCompletedOnboarding: false,
   };
 
-  await db.put('user_profile', initialProfile);
+  await saveProfile(initialProfile);
   return initialProfile;
 }
 
 export async function saveProfile(profile: UserProfile): Promise<void> {
+  // 1. Save synchronously to localStorage
+  try {
+    localStorage.setItem('auri_active_profile', JSON.stringify(profile));
+    if (profile.hasCompletedOnboarding) {
+      localStorage.setItem('auri_onboarding_completed', 'true');
+    }
+  } catch {}
+
+  // 2. Clear old profile records and write fresh profile to IndexedDB
   const db = await getLocalDB();
-  await db.put('user_profile', profile);
+  const tx = db.transaction('user_profile', 'readwrite');
+  await tx.objectStore('user_profile').clear();
+  await tx.objectStore('user_profile').put(profile);
+  await tx.done;
 }
 
 // Conversations storage

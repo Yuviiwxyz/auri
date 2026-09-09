@@ -14,6 +14,7 @@ export interface PeerProfileData {
 }
 export type PeerProfileUpdateHandler = (peerId: string, profile: PeerProfileData) => void;
 export type ReactionReceivedHandler = (messageId: string, emoji: string, senderPeerId: string) => void;
+export type MessageDeletedHandler = (messageId: string) => void;
 
 interface PeerRTCState {
   pc: RTCPeerConnection;
@@ -59,6 +60,7 @@ class NetworkService {
   private onServerStatusCallbacks: Set<ServerConnectionHandler> = new Set();
   private onPeerProfileUpdateCallbacks: Set<PeerProfileUpdateHandler> = new Set();
   private onReactionCallbacks: Set<ReactionReceivedHandler> = new Set();
+  private onMessageDeletedCallbacks: Set<MessageDeletedHandler> = new Set();
 
   public getIsConnecting(): boolean {
     return this.isConnecting;
@@ -249,6 +251,14 @@ class NetworkService {
         const { senderPeerId, profile } = data;
         if (senderPeerId && profile) {
           this.notifyPeerProfileUpdate(senderPeerId, profile);
+        }
+        break;
+      }
+
+      case 'delete-message': {
+        const { messageId } = data;
+        if (messageId) {
+          this.notifyMessageDeleted(messageId);
         }
         break;
       }
@@ -472,6 +482,8 @@ class NetworkService {
           this.notifyTyping(targetPeerId, payload.isTyping);
         } else if (payload.type === 'reaction') {
           this.notifyReaction(payload.messageId, payload.emoji, targetPeerId);
+        } else if (payload.type === 'delete-message') {
+          this.notifyMessageDeleted(payload.messageId);
         }
       } catch (err) {
         console.error('Error parsing data channel message:', err);
@@ -626,6 +638,36 @@ class NetworkService {
     return () => this.onReactionCallbacks.delete(cb);
   }
 
+  public onMessageDeleted(cb: MessageDeletedHandler): () => void {
+    this.onMessageDeletedCallbacks.add(cb);
+    return () => this.onMessageDeletedCallbacks.delete(cb);
+  }
+
+  public deleteMessage(targetPeerId: string, messageId: string) {
+    const cleanTarget = (targetPeerId || '').trim();
+    if (!cleanTarget || !messageId) return;
+
+    // 1. Send over direct WebRTC Data Channel if active
+    const state = this.getPeerState(cleanTarget);
+    if (state && state.dataChannel && state.dataChannel.readyState === 'open') {
+      try {
+        state.dataChannel.send(JSON.stringify({
+          type: 'delete-message',
+          messageId,
+          senderPeerId: this.peerId,
+        }));
+      } catch {}
+    }
+
+    // 2. Also send over WebSocket relay
+    this.sendWs({
+      type: 'delete-message',
+      targetPeerId: cleanTarget,
+      senderPeerId: this.peerId.trim(),
+      messageId,
+    });
+  }
+
   public onServerStatus(cb: ServerConnectionHandler) {
     this.onServerStatusCallbacks.add(cb);
     return () => this.onServerStatusCallbacks.delete(cb);
@@ -657,6 +699,10 @@ class NetworkService {
 
   private notifyReaction(messageId: string, emoji: string, senderPeerId: string) {
     this.onReactionCallbacks.forEach(cb => cb(messageId, emoji, senderPeerId));
+  }
+
+  private notifyMessageDeleted(messageId: string) {
+    this.onMessageDeletedCallbacks.forEach(cb => cb(messageId));
   }
 }
 

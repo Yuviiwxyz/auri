@@ -1,8 +1,9 @@
 import React, { useState, useRef } from 'react';
-import { X, HardDrive, Download, Upload, Trash2, Server, Volume2, ShieldCheck, Check, Bell, BellRing, User, Image as ImageIcon, Copy } from 'lucide-react';
+import { X, HardDrive, Download, Upload, Trash2, Server, Volume2, ShieldCheck, Check, Bell, BellRing, User, Image as ImageIcon, Copy, Share2 } from 'lucide-react';
 import type { UserProfile } from '../types';
 import { exportLocalData, importLocalData } from '../services/storage';
 import { notifications } from '../services/notifications';
+import { getShareUrl, shareInviteLink } from '../utils/url';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -257,22 +258,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="account-link-info">
                 <span className="account-link-label">Your Shareable Account Link:</span>
                 <span className="account-link-url">
-                  {`${window.location.origin}${window.location.pathname}?user=${encodeURIComponent(username || profile.peerId)}`}
+                  {getShareUrl(username || profile.peerId)}
                 </span>
               </div>
-              <button
-                type="button"
-                className="aero-pill-btn secondary copy-link-btn"
-                onClick={() => {
-                  const url = `${window.location.origin}${window.location.pathname}?user=${encodeURIComponent(username || profile.peerId)}`;
-                  navigator.clipboard.writeText(url);
-                  setLinkCopied(true);
-                  setTimeout(() => setLinkCopied(false), 2000);
-                }}
-              >
-                {linkCopied ? <Check size={14} /> : <Copy size={14} />}
-                <span>{linkCopied ? 'Copied Link!' : 'Copy Link'}</span>
-              </button>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="aero-pill-btn secondary copy-link-btn"
+                  onClick={async () => {
+                    const url = getShareUrl(username || profile.peerId);
+                    if (navigator.clipboard) {
+                      await navigator.clipboard.writeText(url);
+                      setLinkCopied(true);
+                      setTimeout(() => setLinkCopied(false), 2000);
+                    }
+                  }}
+                >
+                  {linkCopied ? <Check size={14} /> : <Copy size={14} />}
+                  <span>{linkCopied ? 'Copied!' : 'Copy'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="aero-pill-btn secondary"
+                  style={{ background: 'linear-gradient(180deg, #34d399 0%, #10b981 100%)', color: '#fff' }}
+                  onClick={async () => {
+                    const res = await shareInviteLink(username || profile.peerId, displayName);
+                    if (res.copied) {
+                      setLinkCopied(true);
+                      setTimeout(() => setLinkCopied(false), 2000);
+                    }
+                  }}
+                  title="Share via WhatsApp, Messages, or other apps"
+                >
+                  <Share2 size={14} />
+                  <span>Share</span>
+                </button>
+              </div>
             </div>
           </div>
 

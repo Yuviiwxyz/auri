@@ -151,6 +151,9 @@ export const App: React.FC = () => {
           window.history.replaceState({ view: 'chat', id: targetConvo.id }, '', cleanPath);
         }
       }
+
+      // Proactively request notification permissions (especially for Android APK)
+      notifications.requestPermission().catch(() => {});
     }
 
     loadInitialData();
@@ -429,6 +432,14 @@ export const App: React.FC = () => {
       }
     });
 
+    const unsubDeleted = network.onMessageDeleted(async (messageId) => {
+      await deleteStorageMessage(messageId);
+      setActiveMessages((prev) => prev.filter((m) => m.id !== messageId));
+      const updatedConvos = await getConversations();
+      setConversations(updatedConvos);
+      setTotalMessageCount((prev) => Math.max(0, prev - 1));
+    });
+
     return () => {
       unsubMsg();
       unsubStatus();
@@ -437,6 +448,7 @@ export const App: React.FC = () => {
       unsubProfile();
       unsubServer();
       unsubReaction();
+      unsubDeleted();
     };
   }, []);
 
@@ -512,8 +524,14 @@ export const App: React.FC = () => {
     [activeConversationId, conversations, profile]
   );
 
-  // Delete a single message from local IndexedDB
+  // Delete a single message from local IndexedDB and notify other device
   const handleDeleteMessage = useCallback(async (messageId: string) => {
+    // Notify peer device so the message is deleted there as well!
+    const convo = conversationsRef.current.find((c) => c.id === activeConvoRef.current);
+    if (convo && convo.peerId) {
+      network.deleteMessage(convo.peerId, messageId);
+    }
+
     await deleteStorageMessage(messageId);
     setActiveMessages((prev) => prev.filter((m) => m.id !== messageId));
     const updatedConvos = await getConversations();

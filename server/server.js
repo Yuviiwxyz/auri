@@ -96,6 +96,9 @@ const peerSockets = new Map();
 // Purged immediately when recipient connects and receives them!
 const offlineQueues = new Map();
 
+// In-memory ephemeral profile store for offline peers: targetPeerId -> Map(senderPeerId -> profileUpdate)
+const offlineProfiles = new Map();
+
 // Clean up stale queued messages older than 7 days
 const MAX_QUEUE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 setInterval(() => {
@@ -156,6 +159,18 @@ wss.on('connection', (ws) => {
             }
             // Clear immediately upon sending
             offlineQueues.delete(key);
+          }
+
+          // Check if there are any pending profile updates for this peer
+          if (offlineProfiles.has(key)) {
+            const profileMap = offlineProfiles.get(key);
+            for (const profileUpdate of profileMap.values()) {
+              ws.send(JSON.stringify({
+                type: 'profile-update',
+                ...profileUpdate
+              }));
+            }
+            offlineProfiles.delete(key);
           }
           break;
         }
@@ -229,15 +244,52 @@ wss.on('connection', (ws) => {
         case 'profile-update': {
           const { targetPeerId, profile } = data;
           if (targetPeerId) {
-            const targetWs = peerSockets.get(normId(targetPeerId));
+            const targetKey = normId(targetPeerId);
+            const targetWs = peerSockets.get(targetKey);
+            const senderId = data.senderPeerId || currentPeerId;
+
             if (targetWs && targetWs.readyState === WebSocket.OPEN) {
               targetWs.send(JSON.stringify({
                 type: 'profile-update',
-                senderPeerId: data.senderPeerId || currentPeerId,
+                senderPeerId: senderId,
                 profile,
                 timestamp: Date.now()
               }));
+            } else {
+              // Store latest profile update for when recipient comes online
+              if (!offlineProfiles.has(targetKey)) {
+                offlineProfiles.set(targetKey, new Map());
+              }
+              offlineProfiles.get(targetKey).set(normId(senderId), {
+                senderPeerId: senderId,
+                profile,
+                timestamp: Date.now()
+              });
             }
+          }
+          break;
+        }
+
+        // 3c. Bidirectional Message Deletion
+        case 'delete-message': {
+          const { targetPeerId, messageId } = data;
+          const senderId = data.senderPeerId || currentPeerId;
+          const targetKey = normId(targetPeerId);
+          const targetWs = peerSockets.get(targetKey);
+
+          // If message was queued in memory for an offline peer, purge it immediately
+          if (offlineQueues.has(targetKey)) {
+            const queue = offlineQueues.get(targetKey);
+            offlineQueues.set(targetKey, queue.filter(item => item.message?.id !== messageId));
+          }
+
+          if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+            targetWs.send(JSON.stringify({
+              type: 'delete-message',
+              senderPeerId: senderId,
+              messageId,
+              timestamp: Date.now()
+            }));
           }
           break;
         }
